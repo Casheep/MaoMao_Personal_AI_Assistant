@@ -361,18 +361,16 @@ class TTSConfigurationTests(unittest.TestCase):
         self.assertNotIn("release\\README.md", build_script)
         self.assertFalse(Path("release/README.md").exists())
 
-    def test_beta_build_defines_lite_and_full_editions_without_release_upload(self) -> None:
+    def test_beta_packages_are_local_only_and_support_lite_and_full_editions(self) -> None:
         build_script = Path("build-beta-packages.ps1").read_text(encoding="utf-8")
-        workflow = Path(".github/workflows/build-beta.yml").read_text(encoding="utf-8")
+        self.assertFalse(Path(".github/workflows/build-beta.yml").exists())
         self.assertIn("[ValidateSet('lite', 'full')]", build_script)
         self.assertIn('MaoMao-beta-$Edition', build_script)
         self.assertIn("startup_component_policy", build_script)
         self.assertIn("$runtimeLibrary = Join-Path $runtimeTarget 'Lib'", build_script)
-        self.assertIn("-Edition lite -PythonHome $env:pythonLocation -CompileLauncher", workflow)
-        self.assertIn("-Edition full -PythonHome $env:pythonLocation -CompileLauncher", workflow)
         self.assertIn("Local launcher compilation is disabled by default.", build_script)
-        self.assertNotIn("gh release create", workflow)
-        self.assertNotIn("refs/tags", workflow)
+        self.assertNotIn("gh release create", build_script)
+        self.assertNotIn("refs/tags", build_script)
 
     def setUp(self) -> None:
         self.tts = SpeechSynthesizer(
