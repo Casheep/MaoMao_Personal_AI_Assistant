@@ -1,0 +1,14 @@
+httpx>=0.28,<1
+numpy>=1.26,<3
+sounddevice>=0.5,<1
+soundfile>=0.13,<1
+vosk>=0.3.45,<0.4
+pywin32>=308
+Pillow>=11,<13
+pystray>=0.19,<1
+pyautogui>=0.9.54,<1
+pywinauto>=0.6.9,<1
+pycaw>=20240210,<20270000
+psutil>=5.9,<8
+customtkinter>=5.2,<6
+python-miio==0.6.0.dev0

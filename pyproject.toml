@@ -1,0 +1,16 @@
+[project]
+name = "MaoMao_Personal_AI_Assistant"
+version = "0.1.0b1"
+description = "A private, local-first Windows voice assistant."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Casheep" }
+]
+
+[project.urls]
+Repository = "https://github.com/Casheep/MaoMao_Personal_AI_Assistant"
+Issues = "https://github.com/Casheep/MaoMao_Personal_AI_Assistant/issues"
+
+[tool.unittest]
+start-directory = "tests"
