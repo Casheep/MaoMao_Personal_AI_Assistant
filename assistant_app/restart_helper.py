@@ -44,7 +44,7 @@ def main() -> int:
     _wait_for_process(previous_process_id)
     project_root = Path(__file__).resolve().parent.parent
     subprocess.Popen(
-        [sys.executable, "-m", "assistant_app.rounded_gui"],
+        [sys.executable, "-m", "assistant_app.qt_quick.app"],
         cwd=str(project_root),
         close_fds=True,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

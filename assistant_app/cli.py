@@ -288,7 +288,7 @@ def main() -> int:
     if args.check:
         return run_check(config)
     if args.gui:
-        from .rounded_gui import main as gui_main
+        from .qt_quick import main as gui_main
 
         return gui_main()
     if args.api_smoke:

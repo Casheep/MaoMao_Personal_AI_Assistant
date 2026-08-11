@@ -11,8 +11,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("猫猫")]
 [assembly: AssemblyProduct("猫猫")]
 [assembly: AssemblyCopyright("Copyright © 2026")]
-[assembly: AssemblyVersion("0.1.0.0")]
-[assembly: AssemblyFileVersion("0.1.0.0")]
+[assembly: AssemblyVersion("0.0.2.0")]
+[assembly: AssemblyFileVersion("0.0.2.0")]
 
 internal static class MaoMaoLauncher
 {
@@ -47,7 +47,7 @@ internal static class MaoMaoLauncher
 
         ProcessStartInfo startInfo = new ProcessStartInfo();
         startInfo.FileName = pythonw;
-        startInfo.Arguments = "-m assistant_app.rounded_gui";
+        startInfo.Arguments = "-m assistant_app.qt_quick.app";
         startInfo.WorkingDirectory = projectRoot;
         startInfo.UseShellExecute = false;
         startInfo.CreateNoWindow = true;

@@ -1813,7 +1813,7 @@ class RoundedAssistantWindow(AssistantWindow):
         facts.pack(fill="both", expand=True, padx=26, pady=(0, 26))
         rows = (
             ("生日", "2026 年 8 月 9 日"),
-            ("作者", "Casheep"),
+            ("开发者", "MaoMao contributors"),
             ("会做什么", "语音对话、本地记忆、电脑操作、定时任务与可管理技能"),
             ("隐私", "记忆与权限保存在本机；敏感操作仍由你确认"),
         )

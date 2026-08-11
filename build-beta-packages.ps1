@@ -123,7 +123,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $runtimeCache 'pythonw.exe'))) {
     $oldPythonHome = $env:PYTHONHOME
     try {
         $env:PYTHONHOME = $buildingRuntime
-        & (Join-Path $buildingRuntime 'python.exe') -c "import customtkinter,httpx,numpy,sounddevice,soundfile,vosk,win32api,pywinauto,pyautogui,pycaw,psutil,PIL,pystray; print('portable runtime ok')"
+        & (Join-Path $buildingRuntime 'python.exe') -c "import PySide6,httpx,numpy,sounddevice,soundfile,vosk,win32api,pywinauto,pyautogui,pycaw,psutil,PIL; print('portable runtime ok')"
         if ($LASTEXITCODE -ne 0) { throw 'Portable runtime import check failed.' }
     } finally {
         $env:PYTHONHOME = $oldPythonHome

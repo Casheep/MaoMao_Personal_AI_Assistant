@@ -1062,7 +1062,7 @@ class TTSConfigurationTests(unittest.TestCase):
         self.assertIn('"assistant_app.restart_helper"', gui_source)
         self.assertNotIn('project_root / "MaoMao.exe"', gui_source)
         self.assertIn("WaitForSingleObject", helper_source)
-        self.assertIn('[sys.executable, "-m", "assistant_app.rounded_gui"]', helper_source)
+        self.assertIn('[sys.executable, "-m", "assistant_app.qt_quick.app"]', helper_source)
 
     def test_preload_button_keeps_loading_label_until_completion(self) -> None:
         window = AssistantWindow.__new__(AssistantWindow)
