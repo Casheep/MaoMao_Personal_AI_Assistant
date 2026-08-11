@@ -9,8 +9,8 @@ All notable changes to MaoMao Personal AI Assistant are recorded here.
 - Added safe visual action shortcuts that validate the foreground app and window.
 - Added an About page and masked API key settings page.
 
-## [0.1.0] - 2026-08-11
+## [v0.0.1_beta1] - 2026-08-11
 
-- Initial private development release by Casheep.
+- Initial private development release.
 - Local memory, wake words, continuous conversation, computer control and scheduled tasks.
 - Kimi and MiMo text routing, local/API ASR, and local/API TTS choices.
