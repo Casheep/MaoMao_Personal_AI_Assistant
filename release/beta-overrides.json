@@ -1,0 +1,15 @@
+{
+  "api": {
+    "daily_warning": 1.0,
+    "daily_hard_limit": 3.0,
+    "monthly_hard_limit": 30.0,
+    "per_task_hard_limit": 0.8
+  },
+  "routing": {
+    "max_k3_calls_per_task": 4,
+    "max_screenshots_per_task": 6
+  },
+  "tts": {
+    "worker_python": "runtime/python.exe"
+  }
+}

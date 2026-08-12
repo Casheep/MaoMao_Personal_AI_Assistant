@@ -1,0 +1,167 @@
+{
+  "distribution": {
+    "channel": "beta",
+    "name": "MaoMao Beta"
+  },
+  "api": {
+    "base_url": "https://api.moonshot.cn/v1",
+    "currency": "CNY",
+    "currency_symbol": "￥",
+    "daily_warning": 5.0,
+    "daily_hard_limit": 15.0,
+    "monthly_hard_limit": 300.0,
+    "per_task_hard_limit": 3.5,
+    "timeout_seconds": 180
+  },
+  "mimo_api": {
+    "base_url": "https://api.xiaomimimo.com/v1",
+    "timeout_seconds": 180,
+    "max_output_tokens": 5000
+  },
+  "models": {
+    "routine": "kimi-k2.6",
+    "complex": "kimi-k3",
+    "k2_max_output_tokens": 1500,
+    "k3_max_output_tokens": 5000
+  },
+  "routing": {
+    "model_mode": "auto",
+    "k3_low_threshold": 6,
+    "k3_high_threshold": 9,
+    "max_tool_calls_per_task": 12,
+    "max_k3_calls_per_task": 6,
+    "max_screenshots_per_task": 8
+  },
+  "ui": {
+    "skill_sidebar_expanded": true,
+    "favorite_sidebar_expanded": false,
+    "favorite_skills": [],
+    "custom_skill_categories": [],
+    "skill_category_overrides": {}
+  },
+  "skills": {
+    "wake-word": true,
+    "continuous-conversation": true,
+    "close-current-browser": true,
+    "local-apps": true,
+    "browser-navigation": true,
+    "web-research": true,
+    "screen-inspection": true,
+    "screenshot-retention": true,
+    "screen-control": true,
+    "visual-action-shortcuts": true,
+    "local-memory": true,
+    "file-access": true,
+    "desk-lamp": false,
+    "system-volume": true,
+    "starrail-dailies": false,
+    "scheduled-tasks": true,
+    "current-time": true
+  },
+  "audio": {
+    "backend": "mimo-api",
+    "allow_local_fallback": false,
+    "mimo_base_url": "https://api.xiaomimimo.com/v1",
+    "mimo_model": "mimo-v2.5-asr",
+    "mimo_timeout_seconds": 90,
+    "sample_rate": 16000,
+    "channels": 1
+  },
+  "wake_word": {
+    "enabled": true,
+    "capture_enabled": true,
+    "keyword": "猫猫",
+    "aliases": ["猫猫"],
+    "model_path": "engines/vosk/vosk-model-small-cn-0.22",
+    "response_texts": [
+      "我在呢。",
+      "怎么啦？",
+      "听着呢。"
+    ],
+    "interrupt_response_texts": [
+      "嗯？",
+      "在呢。",
+      "你说。"
+    ],
+    "sample_rate": 16000,
+    "block_size": 1600,
+    "cooldown_seconds": 3.0,
+    "min_confidence": 0.75,
+    "partial_hits_required": 1,
+    "partial_voice_multiplier": 1.05,
+    "fragment_hits_required": 2,
+    "fragment_voice_multiplier": 1.0,
+    "require_voice_match": true,
+    "enrollment_samples": 5,
+    "template_path": "voices/wake-templates.npz",
+    "silence_threshold": 420.0,
+    "speech_start_seconds": 0.3,
+    "adaptive_noise_multiplier": 2.2,
+    "adaptive_noise_offset": 80.0,
+    "silence_seconds": 1.0,
+    "no_speech_timeout": 6.0,
+    "max_record_seconds": 30.0
+  },
+  "tts": {
+    "enabled": true,
+    "allow_local_engines": false,
+    "preload_on_startup": true,
+    "backend": "mimo-api",
+    "leading_silence_ms": 220,
+    "trailing_silence_ms": 180,
+    "mimo_voice": "冰糖",
+    "mimo_style": "自然、亲切、简洁，像熟悉的朋友一样说话。",
+    "mimo_base_url": "https://api.xiaomimimo.com/v1",
+    "mimo_timeout_seconds": 180,
+    "preload_text": "猫猫已经预热完成啦！",
+    "slash_spoken_as": "或者",
+    "fallback_to_sapi": false,
+    "max_characters": 500,
+    "rate": 1,
+    "preferred_voice": ""
+  },
+  "memory": {
+    "recent_messages": 8,
+    "max_retrieved_memories": 5,
+    "profile_memories": 20
+  },
+  "smart_home": {},
+  "automation": {},
+  "conversation": {
+    "continuous": true,
+    "followup_timeout": 6.0,
+    "goodbye_text": "好呀，拜拜，下次再聊。",
+    "goodbye_cache_dir": "voices/generated-goodbyes",
+    "thinking_filler_interval_seconds": 6.0,
+    "thinking_filler_max_count": 4,
+    "thinking_long_wait_after_count": 3,
+    "thinking_first_filler_texts": [
+      "嗯，我想一下。",
+      "我看看。"
+    ],
+    "thinking_followup_texts": [
+      "稍等一下哦。",
+      "嗯，再等我一下。",
+      "快好了。"
+    ],
+    "thinking_long_wait_texts": {
+      "screen": "这个得仔细确认一下，再给我一点时间，弄好了我叫你。",
+      "web": "我还在核对结果，再等我一下，弄好了我叫你。",
+      "action": "这一步还没弄完，再给我一点时间，弄好了我叫你。",
+      "general": "这个需要多想一会儿，你可以先忙，弄好了我叫你。"
+    },
+    "thinking_completion_texts": [
+      "我处理好了。",
+      "好啦，已经处理好了。",
+      "弄好啦。"
+    ],
+    "api_reconnect_text": "API 连接刚刚断开了，我重新连接一下，请稍等。",
+    "api_unavailable_text": "API 还是没有连上，请查看屏幕上的提示。"
+  },
+  "permissions": {
+    "allowlist": []
+  },
+  "applications": {
+    "allowlist": {}
+  }
+}
