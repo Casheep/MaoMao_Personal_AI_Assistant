@@ -12,11 +12,12 @@ from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
+from ..version import __version__
 from .bridge import AssistantBridge
 
 
 _instance_mutex = None
-_ACTIVATION_SERVER = "MaoMao.PersonalAssistant.v0.0.2_beta1"
+_ACTIVATION_SERVER = f"MaoMao.PersonalAssistant.{__version__}"
 
 
 def enable_dpi_awareness() -> None:
@@ -47,7 +48,7 @@ def acquire_single_instance() -> bool:
     if sys.platform != "win32":
         return True
     _instance_mutex = ctypes.windll.kernel32.CreateMutexW(
-        None, False, "Local\\MaoMao.PersonalAssistant.v0.0.2_beta1"
+        None, False, f"Local\\MaoMao.PersonalAssistant.{__version__}"
     )
     return ctypes.windll.kernel32.GetLastError() != 183
 
@@ -111,7 +112,7 @@ def _install_tray(
         return None
     window = engine.rootObjects()[0]
     tray = QSystemTrayIcon(icon, app)
-    tray.setToolTip("MaoMao · v0.0.2_beta1")
+    tray.setToolTip(f"MaoMao · {__version__}")
     menu = QMenu()
     show_action = QAction("显示猫猫", menu)
     hide_action = QAction("隐藏到托盘", menu)

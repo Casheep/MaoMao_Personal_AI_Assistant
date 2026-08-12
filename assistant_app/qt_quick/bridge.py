@@ -21,10 +21,10 @@ from PySide6.QtCore import QObject, Property, QTimer, QUrl, Signal, Slot
 
 from ..audio import APIReconnectFailed, ButtonAudioRecorder, SpeechTranscriber, WakeWordListener
 from ..budget import BudgetExceeded
-from ..cli import build_agent
 from ..components import COMPONENTS_BY_ID, install_component, missing_startup_components
 from ..config import app_paths, load_config, save_local_settings
 from ..database import Database
+from ..runtime import build_agent
 from ..secrets import key_configuration_status, save_api_keys
 from ..skills import SKILL_CATALOG, is_skill_enabled
 from ..tts import ENGINE_BACKENDS, ENGINE_LABELS, MIMO_VOICES, VOICE_PRESETS, SpeechSynthesizer

@@ -14,6 +14,8 @@ from array import array
 from pathlib import Path
 from typing import Any
 
+from .performance import timed
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 VOICE_PRESETS = {
@@ -199,6 +201,7 @@ class SpeechSynthesizer:
             return {}
         return self._request_with_api_reconnect(self._request("warmup"))
 
+    @timed("tts.speak")
     def speak(self, text: str, delivery_mode: str | None = None) -> dict[str, float | int | str]:
         del delivery_mode
         if not self.enabled or not text.strip():

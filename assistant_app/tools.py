@@ -17,23 +17,16 @@ import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from PIL import ImageGrab
-
 from .config import AppPaths, load_config, save_local_setting
 from .database import Database
+from .performance import timed
 from .skills import TOOL_SKILLS, is_skill_enabled
-
-
-@dataclass(frozen=True)
-class ToolResult:
-    success: bool
-    content: str
-    image_path: Path | None = None
+from .tool_handlers import LocalToolHandlers
+from .tool_types import ToolResult
 
 
 ConfirmationCallback = Callable[[str, dict[str, Any]], bool]
@@ -88,7 +81,7 @@ class _VisibleTextParser(HTMLParser):
             self.parts.append(data.strip())
 
 
-class ToolRegistry:
+class ToolRegistry(LocalToolHandlers):
     def __init__(
         self,
         paths: AppPaths,
@@ -122,6 +115,8 @@ class ToolRegistry:
         self._research_browser_active = False
         self._temporary_screenshots: set[Path] = set()
         self._last_screenshot: Path | None = None
+        self._schemas_cache_key: tuple[tuple[str, bool], ...] | None = None
+        self._schemas_cache: tuple[dict[str, Any], ...] = ()
         (self.paths.screenshots / "temporary").mkdir(parents=True, exist_ok=True)
         (self.paths.screenshots / "saved").mkdir(parents=True, exist_ok=True)
         self._cleanup_stale_screenshots()
@@ -134,6 +129,12 @@ class ToolRegistry:
 
     @property
     def schemas(self) -> list[dict[str, Any]]:
+        cache_key = tuple(
+            (skill_id, is_skill_enabled(self.skills_config, skill_id))
+            for skill_id in sorted(set(TOOL_SKILLS.values()))
+        )
+        if cache_key == self._schemas_cache_key:
+            return list(self._schemas_cache)
         schemas = [
             self._schema("get_current_time", "获取电脑当前日期和时间", {}, []),
             self._schema(
@@ -366,7 +367,7 @@ class ToolRegistry:
                 ["text", "description"],
             ),
         ]
-        return [
+        filtered = [
             schema
             for schema in schemas
             # ChatGPT is direct-only: the host recognises an explicit request
@@ -377,6 +378,9 @@ class ToolRegistry:
                 TOOL_SKILLS.get(str(schema["function"]["name"]), ""),
             )
         ]
+        self._schemas_cache_key = cache_key
+        self._schemas_cache = tuple(filtered)
+        return list(self._schemas_cache)
 
     @staticmethod
     def _schema(
@@ -399,6 +403,7 @@ class ToolRegistry:
             },
         }
 
+    @timed("tool.execute")
     def execute(self, name: str, arguments: dict[str, Any], task_id: str) -> ToolResult:
         if self.cancel_event.is_set():
             return ToolResult(False, "当前操作已由用户暂停。")
@@ -435,17 +440,7 @@ class ToolRegistry:
     def _cancelled(self) -> bool:
         return self.cancel_event.is_set()
 
-    def _resolve_safe_path(self, raw: str) -> Path:
-        path = Path(os.path.expandvars(os.path.expanduser(raw)))
-        if not path.is_absolute():
-            path = self.paths.root / path
-        resolved = path.resolve()
-        if not any(resolved == root or root in resolved.parents for root in self.safe_roots):
-            raise PermissionError("路径不在允许范围内。")
-        return resolved
 
-    def _tool_get_current_time(self, _: dict[str, Any]) -> ToolResult:
-        return ToolResult(True, datetime.now().astimezone().isoformat())
 
     def _tool_setup_xiaomi_token(self, _: dict[str, Any]) -> ToolResult:
         confirmation = {
@@ -509,80 +504,8 @@ class ToolRegistry:
         muted = bool(endpoint.GetMute())
         return ToolResult(True, f"系统音量 {current}%，{'已静音' if muted else '未静音'}。")
 
-    def _tool_create_scheduled_task(self, arguments: dict[str, Any]) -> ToolResult:
-        command = str(arguments.get("command") or "").strip()
-        run_at = str(arguments.get("run_at") or "").strip()
-        repeat_rule = str(arguments.get("repeat") or "once").strip().lower()
-        silent = bool(arguments.get("silent", False))
-        if not command:
-            return ToolResult(False, "定时任务内容不能为空。")
-        if repeat_rule not in {"once", "daily"}:
-            return ToolResult(False, "重复方式只能是 once 或 daily。")
-        try:
-            parsed = datetime.fromisoformat(run_at.replace(" ", "T", 1))
-        except ValueError:
-            return ToolResult(False, "执行时间格式无效，请使用 YYYY-MM-DD HH:MM。")
-        preview = {
-            "任务": command,
-            "首次执行": parsed.strftime("%Y-%m-%d %H:%M"),
-            "重复": "每天" if repeat_rule == "daily" else "仅一次",
-            "静默执行": silent,
-        }
-        if not self.confirmation_callback("create_scheduled_task", preview):
-            return ToolResult(False, "用户取消了定时任务。")
-        try:
-            task_id = self.database.create_scheduled_task(
-                command,
-                parsed,
-                repeat_rule=repeat_rule,
-                silent=silent,
-            )
-        except ValueError as exc:
-            return ToolResult(False, str(exc))
-        saved = next(
-            task
-            for task in self.database.list_scheduled_tasks(include_disabled=True)
-            if int(task["id"]) == task_id
-        )
-        first_run = datetime.fromisoformat(str(saved["next_run_at"]))
-        mode = "静默" if silent else "普通"
-        repeat_label = "每天" if repeat_rule == "daily" else "仅一次"
-        return ToolResult(
-            True,
-            f"已创建定时任务 #{task_id}：{repeat_label}，{mode}执行，首次时间 {first_run:%Y-%m-%d %H:%M}。",
-        )
 
-    def _tool_list_scheduled_tasks(self, _: dict[str, Any]) -> ToolResult:
-        tasks = self.database.list_scheduled_tasks(include_disabled=True)
-        if not tasks:
-            return ToolResult(True, "目前没有定时任务。")
-        status_names = {
-            "pending": "等待执行",
-            "running": "执行中",
-            "succeeded": "上次成功",
-            "failed": "上次失败",
-            "cancelled": "已停用",
-        }
-        lines = []
-        for task in tasks[:30]:
-            repeat_label = "每天" if task["repeat_rule"] == "daily" else "仅一次"
-            mode = "静默" if task["silent"] else "普通"
-            enabled = "启用" if task["enabled"] else "停用"
-            status = status_names.get(str(task["last_status"]), str(task["last_status"]))
-            lines.append(
-                f"#{task['id']}｜{repeat_label}｜{task['next_run_at']}｜{mode}｜{enabled}｜"
-                f"{task['command']}｜{status}"
-            )
-        return ToolResult(True, "\n".join(lines))
 
-    def _tool_cancel_scheduled_task(self, arguments: dict[str, Any]) -> ToolResult:
-        try:
-            task_id = int(arguments.get("task_id"))
-        except (TypeError, ValueError):
-            return ToolResult(False, "定时任务编号无效。")
-        if not self.database.cancel_scheduled_task(task_id):
-            return ToolResult(False, f"没有找到定时任务 #{task_id}。")
-        return ToolResult(True, f"已停用定时任务 #{task_id}。")
 
     def _desk_lamp_credentials(self) -> tuple[dict[str, Any], str, str, str]:
         lamp_config = self.smart_home_config.get("desk_lamp", {})
@@ -1992,70 +1915,14 @@ class ToolRegistry:
             return clipped[: punctuation + 1]
         return clipped + "……"
 
-    def _tool_save_memory(self, arguments: dict[str, Any]) -> ToolResult:
-        content = str(arguments["content"]).strip()
-        tags = str(arguments.get("tags") or "").strip()
-        memory_key = str(arguments.get("memory_key") or "").strip().lower()
-        if not content:
-            return ToolResult(False, "记忆内容不能为空。")
-        if len(content) > 2000:
-            return ToolResult(False, "单条记忆不能超过 2000 个字符。")
-        if memory_key and not re.fullmatch(r"[a-z0-9_.-]{1,80}", memory_key):
-            return ToolResult(False, "记忆键只能包含小写字母、数字、点、横线或下划线。")
-        memory_id = self.database.remember(content, tags, memory_key)
-        return ToolResult(True, f"已保存到本地长期记忆 #{memory_id}。")
 
-    def _tool_list_memories(self, arguments: dict[str, Any]) -> ToolResult:
-        limit = max(1, min(50, int(arguments.get("limit") or 20)))
-        return ToolResult(
-            True,
-            json.dumps(self.database.list_memories(limit), ensure_ascii=False),
-        )
 
-    def _tool_list_directory(self, arguments: dict[str, Any]) -> ToolResult:
-        path = self._resolve_safe_path(str(arguments["path"]))
-        if not path.is_dir():
-            return ToolResult(False, "目标不是目录。")
-        entries = []
-        for item in sorted(path.iterdir(), key=lambda candidate: (not candidate.is_dir(), candidate.name.lower()))[:100]:
-            entries.append({"name": item.name, "type": "directory" if item.is_dir() else "file"})
-        return ToolResult(True, json.dumps(entries, ensure_ascii=False))
 
-    def _tool_search_files(self, arguments: dict[str, Any]) -> ToolResult:
-        query = str(arguments["query"]).strip().lower()
-        if len(query) < 2:
-            return ToolResult(False, "搜索词至少需要两个字符。")
-        root_value = str(arguments.get("root") or "").strip()
-        roots = [self._resolve_safe_path(root_value)] if root_value else self.safe_roots
-        matches: list[str] = []
-        for root in roots:
-            if not root.exists():
-                continue
-            try:
-                for item in root.rglob("*"):
-                    if query in item.name.lower():
-                        matches.append(str(item))
-                    if len(matches) >= 50:
-                        break
-            except (PermissionError, OSError):
-                continue
-            if len(matches) >= 50:
-                break
-        return ToolResult(True, json.dumps(matches, ensure_ascii=False))
 
-    def _tool_read_text_file(self, arguments: dict[str, Any]) -> ToolResult:
-        path = self._resolve_safe_path(str(arguments["path"]))
-        if not path.is_file():
-            return ToolResult(False, "文件不存在。")
-        if path.stat().st_size > 2_000_000:
-            return ToolResult(False, "文件超过 2MB，首版不读取。")
-        try:
-            content = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            content = path.read_text(encoding="utf-8-sig")
-        return ToolResult(True, content[:10_000])
 
     def _tool_inspect_screen(self, _: dict[str, Any]) -> ToolResult:
+        from PIL import ImageGrab
+
         filename = datetime.now().strftime("screen-%Y%m%d-%H%M%S-%f.png")
         path = self.paths.screenshots / "temporary" / filename
         image = ImageGrab.grab(all_screens=True)
@@ -2066,6 +1933,8 @@ class ToolRegistry:
         return ToolResult(True, "已截取当前屏幕，图片附在下一条消息中。", image_path=path)
 
     def _tool_save_screenshot(self, _: dict[str, Any]) -> ToolResult:
+        from PIL import ImageGrab
+
         saved_dir = self.paths.screenshots / "saved"
         saved_dir.mkdir(parents=True, exist_ok=True)
         filename = datetime.now().strftime("saved-%Y%m%d-%H%M%S-%f.png")

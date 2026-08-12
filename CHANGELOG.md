@@ -2,6 +2,21 @@
 
 All notable changes to MaoMao Personal AI Assistant are recorded here.
 
+## [v0.0.2_beta2] - 2026-08-12
+
+- Initialized the next beta development version from `v0.0.2_beta1`.
+- Added rounded popup, selection, checkbox, progress and text-input surfaces throughout the Qt Quick interface.
+- Added a local committed-source and Git-history archive helper for post-commit snapshots.
+- Corrected the developer attribution to `casheep` across application metadata and interfaces.
+- Deferred conversation, HTTP and audio-device dependencies until their features are first used.
+- Removed repeated wake-template calibration at startup and optimized MFCC framing, DTW memory use and real-time audio buffering.
+- Added versioned database initialization, query indexes and a single-query usage snapshot for budget checks.
+- Added FTS5 trigram memory search, automatically invalidated read caches and single-transaction conversation writes.
+- Split deterministic local tools into a dedicated handler module, cached tool schemas and deferred optional screenshot imports.
+- Added rotating, content-free local timing diagnostics for runtime, model, context, tool and speech operations.
+- Separated runtime construction from the CLI and removed the inactive legacy GUI implementations and dependencies.
+- Made generated beta JSON/key files UTF-8 without BOM while retaining tolerant runtime config loading.
+
 ## [v0.0.2_beta1] - 2026-08-12
 
 - Completed the Qt Quick/PySide6 desktop interface migration and made it the sole GUI entrypoint.

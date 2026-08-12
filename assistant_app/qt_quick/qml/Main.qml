@@ -174,6 +174,82 @@ ApplicationWindow {
         leftPadding: 13
         rightPadding: 28
         background: Rectangle { radius: height / 2; color: "#E9E9ED" }
+        delegate: ItemDelegate {
+            required property int index
+            width: ListView.view ? ListView.view.width : control.width
+            implicitHeight: 36
+            text: control.textAt(index)
+            highlighted: control.highlightedIndex === index
+            contentItem: Text {
+                text: parent.text
+                color: window.textColor
+                font: control.font
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideRight
+            }
+            background: Rectangle {
+                radius: 10
+                color: parent.highlighted ? "#E8F2FF" : (parent.hovered ? "#F0F0F3" : "transparent")
+            }
+        }
+        popup: Popup {
+            y: control.height + 4
+            width: control.width
+            implicitHeight: Math.min(contentItem.implicitHeight + topPadding + bottomPadding, 260)
+            topPadding: 6
+            bottomPadding: 6
+            leftPadding: 6
+            rightPadding: 6
+            background: Rectangle {
+                radius: 14
+                color: window.cardColor
+                border.color: window.borderColor
+                border.width: 1
+            }
+            contentItem: ListView {
+                clip: true
+                implicitHeight: contentHeight
+                model: control.popup.visible ? control.delegateModel : null
+                currentIndex: control.highlightedIndex
+                ScrollIndicator.vertical: ScrollIndicator { }
+            }
+        }
+    }
+
+    component RoundCheckBox: CheckBox {
+        id: control
+        spacing: 8
+        indicator: Rectangle {
+            implicitWidth: 22
+            implicitHeight: 22
+            x: control.leftPadding
+            y: (control.height - height) / 2
+            radius: 6
+            color: control.checked ? window.accent : "#F0F0F3"
+            border.color: control.checked ? window.accent : window.borderColor
+            Text { anchors.centerIn: parent; text: "✓"; visible: control.checked; color: "white"; font.bold: true }
+        }
+        contentItem: Text {
+            text: control.text
+            color: window.textColor
+            font: control.font
+            leftPadding: control.indicator.width + control.spacing
+            verticalAlignment: Text.AlignVCenter
+        }
+    }
+
+    component RoundedProgressBar: ProgressBar {
+        id: control
+        implicitHeight: 10
+        background: Rectangle { radius: height / 2; color: "#E2E2E7" }
+        contentItem: Item {
+            Rectangle {
+                width: control.visualPosition * parent.width
+                height: parent.height
+                radius: height / 2
+                color: window.accent
+            }
+        }
     }
 
     component SettingTitle: Label {
@@ -251,7 +327,7 @@ ApplicationWindow {
             Label { text: confirmationPopup.highRisk ? "确认高风险操作" : "允许执行工具？"; font.pixelSize: 21; font.bold: true; color: window.textColor }
             Label { Layout.fillWidth: true; text: confirmationPopup.actionName; wrapMode: Text.Wrap; font.bold: true; color: confirmationPopup.highRisk ? "#D70015" : window.accent }
             TextArea { Layout.fillWidth: true; Layout.preferredHeight: 160; text: confirmationPopup.details; readOnly: true; wrapMode: TextEdit.Wrap; color: window.secondaryText; background: Rectangle { color: "#F7F7F9"; radius: 12 } }
-            CheckBox { id: rememberPermission; visible: !confirmationPopup.highRisk; text: "记住这个具体动作"; checked: true }
+            RoundCheckBox { id: rememberPermission; visible: !confirmationPopup.highRisk; text: "记住这个具体动作"; checked: true }
             Label { visible: confirmationPopup.highRisk; text: "此类操作每次都需要确认，不会保存授权。"; color: "#D70015" }
             RowLayout {
                 Layout.alignment: Qt.AlignRight
@@ -547,7 +623,7 @@ ApplicationWindow {
                             Label { text: "生日"; color: "#8E8E93"; font.pixelSize: 11 }
                             Label { text: "2026 年 8 月 9 日"; color: window.textColor; font.bold: true }
                             Label { text: "开发者"; color: "#8E8E93"; font.pixelSize: 11 }
-                            Label { text: "MaoMao contributors"; color: window.textColor; font.bold: true }
+                            Label { text: "casheep"; color: window.textColor; font.bold: true }
                             Label { text: "会做什么"; color: "#8E8E93"; font.pixelSize: 11 }
                             Label { Layout.fillWidth: true; text: "语音对话、本地记忆、电脑操作、定时任务与可管理技能"; wrapMode: Text.Wrap; color: window.textColor }
                             Label { text: "隐私"; color: "#8E8E93"; font.pixelSize: 11 }
@@ -713,7 +789,7 @@ ApplicationWindow {
                         anchors.topMargin: 16
                         anchors.bottomMargin: 16
                         spacing: 12
-                        TextArea { id: input; Layout.fillWidth: true; Layout.fillHeight: true; placeholderText: "输入消息，Ctrl + Enter 发送"; wrapMode: TextEdit.Wrap; color: window.textColor; background: Rectangle { color: window.cardColor } Keys.onPressed: event => { if (event.key === Qt.Key_Return && (event.modifiers & Qt.ControlModifier)) { send(); event.accepted = true } } function send() { const value = text.trim(); if (value !== "" && !assistant.busy) { assistant.submit(value); text = "" } } }
+                        TextArea { id: input; Layout.fillWidth: true; Layout.fillHeight: true; placeholderText: "输入消息，Ctrl + Enter 发送"; wrapMode: TextEdit.Wrap; color: window.textColor; background: Rectangle { color: window.cardColor; radius: 24 } Keys.onPressed: event => { if (event.key === Qt.Key_Return && (event.modifiers & Qt.ControlModifier)) { send(); event.accepted = true } } function send() { const value = text.trim(); if (value !== "" && !assistant.busy) { assistant.submit(value); text = "" } } }
                         BlueButton { implicitWidth: 112; implicitHeight: 44; text: assistant.busy ? "处理中" : "发送"; enabled: !assistant.busy; onClicked: input.send() }
                     }
                 }
@@ -766,7 +842,7 @@ ApplicationWindow {
             anchors.centerIn: parent; width: Math.min(520, parent.width - 80); spacing: 16
             Label { text: "准备猫猫"; font.pixelSize: 25; font.bold: true; color: window.textColor; Layout.alignment: Qt.AlignHCenter }
             Label { Layout.fillWidth: true; text: assistant.startupMessage; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter; color: window.secondaryText }
-            ProgressBar { Layout.fillWidth: true; from: 0; to: 100; value: assistant.startupProgress }
+            RoundedProgressBar { Layout.fillWidth: true; from: 0; to: 100; value: assistant.startupProgress }
             BlueButton { text: assistant.startupProgress > 0 ? "正在安装" : "安装所需组件"; enabled: assistant.startupProgress === 0; Layout.alignment: Qt.AlignHCenter; onClicked: assistant.installStartupComponents() }
         }
     }

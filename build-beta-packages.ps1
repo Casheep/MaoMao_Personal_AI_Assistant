@@ -180,9 +180,12 @@ foreach ($cleanupPath in $runtimeCleanup) {
 }
 
 Copy-Item -LiteralPath (Join-Path $projectRoot 'assistant_app') -Destination (Join-Path $stage 'assistant_app') -Recurse
-$unusedLocalWorker = Join-Path $stage 'assistant_app\workers\cosyvoice_worker.py'
-if (Test-Path -LiteralPath $unusedLocalWorker) {
-    Remove-Item -LiteralPath $unusedLocalWorker -Force
+$unusedApplicationFiles = @('workers\cosyvoice_worker.py')
+foreach ($relativePath in $unusedApplicationFiles) {
+    $unusedFile = Join-Path $stage "assistant_app\$relativePath"
+    if (Test-Path -LiteralPath $unusedFile) {
+        Remove-Item -LiteralPath $unusedFile -Force
+    }
 }
 Get-ChildItem -LiteralPath (Join-Path $stage 'assistant_app') -Recurse -Directory -Filter '__pycache__' | ForEach-Object {
     Remove-BuildPath $_.FullName (Join-Path $stage 'assistant_app')
@@ -197,9 +200,14 @@ foreach ($asset in @('miao.ico', 'miao-icon.png', 'miao.jpg')) {
 $baseConfig = Get-Content -LiteralPath (Join-Path $projectRoot 'config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $betaOverrides = Get-Content -LiteralPath (Join-Path $projectRoot 'release\beta-overrides.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 Merge-ConfigObject $baseConfig $betaOverrides
-$baseConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $stage 'config.json') -Encoding UTF8
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText(
+    (Join-Path $stage 'config.json'),
+    (($baseConfig | ConvertTo-Json -Depth 20) + [Environment]::NewLine),
+    $utf8NoBom
+)
 $stageKeyFile = Join-Path $stage 'api_key.txt'
-"kimi_key=`nmimo_key=`n" | Set-Content -LiteralPath $stageKeyFile -Encoding UTF8
+[System.IO.File]::WriteAllText($stageKeyFile, "kimi_key=`nmimo_key=`n", $utf8NoBom)
 
 if ($Edition -eq 'full') {
     $voskSource = Join-Path $projectRoot 'engines\vosk\vosk-model-small-cn-0.22'
@@ -260,7 +268,11 @@ $manifest = [ordered]@{
     bundled_keys = $false
     excluded = $excludedItems
 }
-$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stage 'release-manifest.json') -Encoding UTF8
+[System.IO.File]::WriteAllText(
+    (Join-Path $stage 'release-manifest.json'),
+    (($manifest | ConvertTo-Json -Depth 4) + [Environment]::NewLine),
+    $utf8NoBom
+)
 
 if (Test-Path -LiteralPath $zipPath) {
     Remove-BuildPath $zipPath $distRoot

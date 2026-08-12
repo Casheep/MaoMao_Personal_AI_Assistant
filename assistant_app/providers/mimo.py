@@ -9,6 +9,7 @@ from ..budget import BudgetManager
 from ..database import Database
 from ..secrets import redact_secret
 from .kimi import KimiClient, KimiResponse
+from ..performance import timed
 
 
 class MiMoClient:
@@ -108,6 +109,7 @@ class HybridModelClient:
         self.config = config
         self.budget = kimi.budget
 
+    @timed("model.request")
     def chat(
         self,
         messages: list[dict[str, Any]],

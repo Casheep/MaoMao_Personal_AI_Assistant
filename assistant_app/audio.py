@@ -11,11 +11,13 @@ import json
 import queue
 import re
 import time
+from collections import deque
+from functools import lru_cache
+from heapq import nsmallest
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
-import sounddevice as sd
 
 from .secrets import load_mimo_key, redact_secret
 
@@ -26,6 +28,31 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 class APIReconnectFailed(RuntimeError):
     """API failed again after its stale connection was rebuilt."""
+
+
+def _sounddevice():
+    """Import PortAudio bindings only when capture or playback starts."""
+    import sounddevice
+
+    return sounddevice
+
+
+@lru_cache(maxsize=4)
+def _mfcc_geometry(sample_rate: int, frame_length: int) -> tuple[np.ndarray, np.ndarray]:
+    """Cache the fixed window and Mel filter bank used by wake-word scoring."""
+    window = np.hanning(frame_length).astype(np.float32)
+    mel = lambda hz: 2595.0 * np.log10(1.0 + hz / 700.0)
+    hz = lambda value: 700.0 * (10 ** (value / 2595.0) - 1.0)
+    points = hz(np.linspace(mel(40.0), mel(sample_rate / 2), 28))
+    bins = np.floor((512 + 1) * points / sample_rate).astype(int)
+    filters = np.zeros((26, 257), dtype=np.float32)
+    for index in range(26):
+        left, centre, right = bins[index : index + 3]
+        rising = np.arange(left, max(left + 1, centre))
+        filters[index, rising] = (rising - left) / max(1, centre - left)
+        falling = np.arange(centre, max(centre + 1, right))
+        filters[index, falling] = (right - falling) / max(1, right - centre)
+    return window, filters
 
 
 def _configure_cuda_dlls() -> None:
@@ -60,7 +87,7 @@ def play_wav_file(path: Path) -> None:
 
         winsound.PlaySound(str(path), winsound.SND_FILENAME)
         return
-    sd.play(audio, sample_rate, blocking=True)
+    _sounddevice().play(audio, sample_rate, blocking=True)
 
 
 class AudioRecorder:
@@ -80,7 +107,7 @@ class AudioRecorder:
                 chunks.append(indata.copy())
 
         print("正在录音，按 Enter 停止……")
-        with sd.InputStream(
+        with _sounddevice().InputStream(
             samplerate=self.sample_rate,
             channels=self.channels,
             dtype="int16",
@@ -119,7 +146,7 @@ class ButtonAudioRecorder:
         self.adaptive_noise_multiplier = max(1.2, adaptive_noise_multiplier)
         self.adaptive_noise_offset = max(0.0, adaptive_noise_offset)
         self._chunks: list[np.ndarray] = []
-        self._stream: sd.InputStream | None = None
+        self._stream: Any = None
         self._lock = threading.Lock()
         self._speech_started = threading.Event()
         self._recording_started_at = 0.0
@@ -128,7 +155,7 @@ class ButtonAudioRecorder:
         self._continuation_voice_seconds = 0.0
         self._noise_floor = max(1.0, silence_threshold / 4.0)
         self._dynamic_threshold = silence_threshold
-        self._recent_levels: list[tuple[float, float]] = []
+        self._recent_levels: deque[tuple[float, float]] = deque()
         self._recent_level_seconds = 0.0
 
     @property
@@ -147,7 +174,7 @@ class ButtonAudioRecorder:
         self._continuation_voice_seconds = 0.0
         self._noise_floor = max(1.0, self.silence_threshold / 4.0)
         self._dynamic_threshold = self.silence_threshold
-        self._recent_levels = []
+        self._recent_levels.clear()
         self._recent_level_seconds = 0.0
 
         def callback(indata: np.ndarray, frames: int, time_info: object, status: object) -> None:
@@ -162,7 +189,7 @@ class ButtonAudioRecorder:
             with self._lock:
                 self._chunks.append(indata.copy())
 
-        stream = sd.InputStream(
+        stream = _sounddevice().InputStream(
             samplerate=self.sample_rate,
             channels=self.channels,
             dtype="int16",
@@ -210,7 +237,7 @@ class ButtonAudioRecorder:
         self._recent_levels.append((rms, frame_seconds))
         self._recent_level_seconds += frame_seconds
         while self._recent_levels and self._recent_level_seconds > 1.25:
-            _old_level, old_seconds = self._recent_levels.pop(0)
+            _old_level, old_seconds = self._recent_levels.popleft()
             self._recent_level_seconds -= old_seconds
 
         adaptive_continuation = 0.0
@@ -299,6 +326,7 @@ class WakeWordListener:
         self.keyword = str(config.get("keyword", "猫猫"))
         aliases = config.get("aliases", [self.keyword, "喵喵"])
         self.aliases = [str(value) for value in aliases]
+        self._normalised_aliases = self._normalise_aliases(self.aliases)
         model_path = Path(str(config.get("model_path", "engines/vosk/vosk-model-small-cn-0.22")))
         project_root = Path(__file__).resolve().parent.parent
         self.model_path = model_path if model_path.is_absolute() else project_root / model_path
@@ -385,6 +413,7 @@ class WakeWordListener:
             raise ValueError("至少需要一个唤醒词。")
         self.keyword = values[0]
         self.aliases = list(dict.fromkeys(values))
+        self._normalised_aliases = self._normalise_aliases(self.aliases)
         if clear_enrollment:
             self.verifier.clear()
 
@@ -392,9 +421,13 @@ class WakeWordListener:
     def _normalise(value: str) -> str:
         return re.sub(r"[^\w\u4e00-\u9fff]", "", value).lower()
 
+    @classmethod
+    def _normalise_aliases(cls, aliases: list[str]) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(cls._normalise(alias) for alias in aliases))
+
     def _matches(self, value: str) -> bool:
         normalised = self._normalise(value)
-        return any(normalised == self._normalise(alias) for alias in self.aliases)
+        return normalised in self._normalised_aliases
 
     def _keyword_hint(self, value: str) -> bool:
         """Accept an exact keyword or one half of a repeated-character keyword."""
@@ -405,7 +438,7 @@ class WakeWordListener:
             len(alias_value) == 2
             and alias_value[0] == alias_value[1]
             and normalised == alias_value[0]
-            for alias_value in (self._normalise(alias) for alias in self.aliases)
+            for alias_value in self._normalised_aliases
         )
 
     def _grammar_phrases(self) -> list[str]:
@@ -496,7 +529,7 @@ class WakeWordListener:
 
         deadline = time.monotonic() + max(2.0, float(timeout_seconds))
         try:
-            with sd.RawInputStream(
+            with _sounddevice().RawInputStream(
                 samplerate=self.sample_rate,
                 blocksize=self.block_size,
                 channels=1,
@@ -568,7 +601,7 @@ class WakeWordListener:
 
             try:
                 self._stream_idle.clear()
-                with sd.RawInputStream(
+                with _sounddevice().RawInputStream(
                     samplerate=self.sample_rate,
                     blocksize=self.block_size,
                     channels=1,
@@ -666,12 +699,16 @@ class WakeVoiceVerifier:
         if not self.path.is_file():
             return
         try:
-            values = np.load(self.path, allow_pickle=False)
-            templates = [values[key].astype(np.float32) for key in sorted(values.files) if key.startswith("template_")]
-            threshold = float(values["threshold"][0])
+            with np.load(self.path, allow_pickle=False) as values:
+                templates = [
+                    values[key].astype(np.float32)
+                    for key in sorted(values.files)
+                    if key.startswith("template_")
+                ]
+                threshold = float(values["threshold"][0])
             if len(templates) >= 3:
                 self.templates = templates
-                self.threshold = max(threshold, self._calibrated_threshold(templates))
+                self.threshold = min(0.68, max(0.35, threshold))
         except Exception:
             self.templates = []
 
@@ -684,11 +721,15 @@ class WakeVoiceVerifier:
             raise ValueError("录音为空。")
         frame_length = max(1, int(sample_rate * 0.025))
         hop = max(1, int(sample_rate * 0.010))
-        energy_frames = max(1, 1 + max(0, len(audio) - frame_length) // hop)
-        energies = np.array([
-            np.sqrt(np.mean(audio[i * hop : i * hop + frame_length] ** 2) + 1.0)
-            for i in range(energy_frames)
-        ])
+        energy_audio = (
+            audio
+            if len(audio) >= frame_length
+            else np.pad(audio, (0, frame_length - len(audio)))
+        )
+        energy_windows = np.lib.stride_tricks.sliding_window_view(
+            energy_audio, frame_length
+        )[::hop]
+        energies = np.sqrt(np.mean(energy_windows * energy_windows, axis=1) + 1.0)
         active = np.flatnonzero(energies >= max(220.0, float(energies.max()) * 0.10))
         if not active.size:
             raise ValueError("没有检测到清晰语音。")
@@ -697,22 +738,10 @@ class WakeVoiceVerifier:
         audio = audio[start:end] / 32768.0
         if len(audio) < frame_length:
             audio = np.pad(audio, (0, frame_length - len(audio)))
-        count = 1 + (len(audio) - frame_length) // hop
-        frames = np.stack([audio[i * hop : i * hop + frame_length] for i in range(count)])
-        frames *= np.hanning(frame_length)
+        frames = np.lib.stride_tricks.sliding_window_view(audio, frame_length)[::hop].copy()
+        window, filters = _mfcc_geometry(sample_rate, frame_length)
+        frames *= window
         spectrum = np.abs(np.fft.rfft(frames, n=512)) ** 2
-
-        mel = lambda hz: 2595.0 * np.log10(1.0 + hz / 700.0)
-        hz = lambda value: 700.0 * (10 ** (value / 2595.0) - 1.0)
-        points = hz(np.linspace(mel(40.0), mel(sample_rate / 2), 28))
-        bins = np.floor((512 + 1) * points / sample_rate).astype(int)
-        filters = np.zeros((26, spectrum.shape[1]), dtype=np.float32)
-        for index in range(26):
-            left, centre, right = bins[index : index + 3]
-            for value in range(left, max(left + 1, centre)):
-                filters[index, value] = (value - left) / max(1, centre - left)
-            for value in range(centre, max(centre + 1, right)):
-                filters[index, value] = (right - value) / max(1, right - centre)
         log_mel = np.log(np.maximum(spectrum @ filters.T, 1e-10))
         mfcc = dct(log_mel, type=2, axis=1, norm="ortho")[:, :13]
         mfcc -= mfcc.mean(axis=0, keepdims=True)
@@ -726,20 +755,33 @@ class WakeVoiceVerifier:
 
         costs = cdist(first, second, metric="cosine")
         rows, columns = costs.shape
-        totals = np.full((rows + 1, columns + 1), np.inf, dtype=np.float32)
-        steps = np.zeros((rows + 1, columns + 1), dtype=np.int32)
-        totals[0, 0] = 0.0
-        for row in range(1, rows + 1):
+        previous = np.full(columns + 1, np.inf, dtype=np.float32)
+        current = np.full(columns + 1, np.inf, dtype=np.float32)
+        previous_steps = np.zeros(columns + 1, dtype=np.int32)
+        current_steps = np.zeros(columns + 1, dtype=np.int32)
+        previous[0] = 0.0
+        for row in range(rows):
+            current.fill(np.inf)
+            current_steps.fill(0)
+            row_costs = costs[row]
             for column in range(1, columns + 1):
-                choices = (
-                    (totals[row - 1, column], steps[row - 1, column]),
-                    (totals[row, column - 1], steps[row, column - 1]),
-                    (totals[row - 1, column - 1], steps[row - 1, column - 1]),
-                )
-                best_total, best_steps = min(choices, key=lambda item: item[0])
-                totals[row, column] = best_total + costs[row - 1, column - 1]
-                steps[row, column] = best_steps + 1
-        return float(totals[rows, columns] / max(1, steps[rows, columns]))
+                up = previous[column]
+                left = current[column - 1]
+                diagonal = previous[column - 1]
+                if diagonal <= up and diagonal <= left:
+                    best_total = diagonal
+                    best_steps = previous_steps[column - 1]
+                elif up <= left:
+                    best_total = up
+                    best_steps = previous_steps[column]
+                else:
+                    best_total = left
+                    best_steps = current_steps[column - 1]
+                current[column] = best_total + row_costs[column - 1]
+                current_steps[column] = best_steps + 1
+            previous, current = current, previous
+            previous_steps, current_steps = current_steps, previous_steps
+        return float(previous[columns] / max(1, previous_steps[columns]))
 
     @classmethod
     def _calibrated_threshold(cls, templates: list[np.ndarray]) -> float:
@@ -787,8 +829,8 @@ class WakeVoiceVerifier:
             candidate = self._features(samples, sample_rate)
         except ValueError:
             return float("inf")
-        scores = sorted(self._distance(candidate, template) for template in templates)
-        return float(np.mean(scores[:2]))
+        scores = nsmallest(2, (self._distance(candidate, template) for template in templates))
+        return float(np.mean(scores))
 
     def verify(self, audio_bytes: bytes, sample_rate: int) -> bool:
         return self.score(audio_bytes, sample_rate) <= self.threshold
@@ -1081,7 +1123,7 @@ class SpeechTranscriber:
 
 
 def input_devices() -> list[str]:
-    devices = sd.query_devices()
+    devices = _sounddevice().query_devices()
     return [
         f"{index}: {device['name']}"
         for index, device in enumerate(devices)

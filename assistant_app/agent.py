@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from .budget import BudgetExceeded
 from .database import Database
+from .performance import timed
 from .providers import HybridModelClient, new_task_id
 from .router import RouteDecision, choose_route
 from .skills import SkillInvocation, is_skill_enabled, match_local_skill
@@ -69,6 +70,13 @@ class PersonalAgent:
         if self.cancel_event.is_set():
             raise OperationCancelled("当前操作已由用户暂停。")
 
+    def _store_exchange(self, user_text: str, answer_text: str) -> None:
+        self.database.add_messages(
+            self.session_id,
+            (("user", user_text), ("assistant", answer_text)),
+        )
+
+    @timed("agent.context")
     def _messages(self, text: str, input_mode: str) -> list[dict[str, Any]]:
         recent_limit = int(self.config["memory"]["recent_messages"])
         memory_limit = int(self.config["memory"]["max_retrieved_memories"])
@@ -278,8 +286,7 @@ class PersonalAgent:
         self._ensure_not_cancelled()
         if not result.success:
             answer = result.content
-            self.database.add_message(self.session_id, "user", text)
-            self.database.add_message(self.session_id, "assistant", answer)
+            self._store_exchange(text, answer)
             return AgentAnswer(answer, route, 0.0)
 
         try:
@@ -320,8 +327,7 @@ class PersonalAgent:
         answer = str(response.message.get("content") or "").strip()
         if not answer:
             answer = ToolRegistry._concise_chatgpt_answer(source_text)
-        self.database.add_message(self.session_id, "user", text)
-        self.database.add_message(self.session_id, "assistant", answer)
+        self._store_exchange(text, answer)
         task_cost = self.database.usage_total(
             "day", task_id=task_id, currency=currency
         ) - task_start_cost
@@ -346,12 +352,7 @@ class PersonalAgent:
         if announcement and self.progress_callback is not None:
             self.progress_callback(announcement)
         result = self.tools.execute("run_starrail_dailies", {}, task_id)
-        self.database.add_message(self.session_id, "user", text)
-        self.database.add_message(
-            self.session_id,
-            "assistant",
-            announcement if result.success else result.content,
-        )
+        self._store_exchange(text, announcement if result.success else result.content)
         if result.success:
             return AgentAnswer(
                 "",
@@ -414,8 +415,7 @@ class PersonalAgent:
         )
         self._ensure_not_cancelled()
         saved_answer = invocation.announcement if result.success else result.content
-        self.database.add_message(self.session_id, "user", text)
-        self.database.add_message(self.session_id, "assistant", saved_answer)
+        self._store_exchange(text, saved_answer)
         skill_route = RouteDecision(
             "local-skill",
             "disabled",
@@ -450,9 +450,8 @@ class PersonalAgent:
         if announcement and self.progress_callback is not None:
             self.progress_callback(announcement)
         result = self.tools.execute("control_desk_lamp", arguments, task_id)
-        self.database.add_message(self.session_id, "user", text)
         saved_answer = announcement if result.success else result.content
-        self.database.add_message(self.session_id, "assistant", saved_answer)
+        self._store_exchange(text, saved_answer)
         if result.success:
             return AgentAnswer("", route, 0.0, silent=True)
         return AgentAnswer(result.content, route, 0.0)
@@ -474,8 +473,7 @@ class PersonalAgent:
         if not result.success:
             return None
         answer = "好，已经弄好了。"
-        self.database.add_message(self.session_id, "user", text)
-        self.database.add_message(self.session_id, "assistant", answer)
+        self._store_exchange(text, answer)
         return AgentAnswer("", route, 0.0, silent=True)
 
     def run(self, text: str, input_mode: str = "text") -> AgentAnswer:
@@ -542,8 +540,7 @@ class PersonalAgent:
                 close_research = getattr(self.tools, "close_research_browser", None)
                 if callable(close_research):
                     close_research()
-                self.database.add_message(self.session_id, "user", text)
-                self.database.add_message(self.session_id, "assistant", answer)
+                self._store_exchange(text, answer)
                 task_cost = self.database.usage_total(
                     "day", task_id=task_id, currency=currency
                 ) - task_start_cost
@@ -596,12 +593,7 @@ class PersonalAgent:
                     and self._is_simple_open_only(text, name)
                 ):
                     announcement = self._tool_announcement(name, arguments)
-                    self.database.add_message(self.session_id, "user", text)
-                    self.database.add_message(
-                        self.session_id,
-                        "assistant",
-                        announcement or result.content,
-                    )
+                    self._store_exchange(text, announcement or result.content)
                     task_cost = self.database.usage_total(
                         "day", task_id=task_id, currency=currency
                     ) - task_start_cost

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -20,18 +21,24 @@ class AppPaths:
     key_file: Path
 
 
-def app_paths() -> AppPaths:
-    data = PROJECT_ROOT / "data"
+@lru_cache(maxsize=4)
+def _app_paths(project_root: Path) -> AppPaths:
+    data = project_root / "data"
     screenshots = data / "screenshots"
     data.mkdir(parents=True, exist_ok=True)
     screenshots.mkdir(parents=True, exist_ok=True)
     return AppPaths(
-        root=PROJECT_ROOT,
+        root=project_root,
         data=data,
         database=data / "assistant.db",
         screenshots=screenshots,
-        key_file=PROJECT_ROOT / "api_key.txt",
+        key_file=project_root / "api_key.txt",
     )
+
+
+def app_paths() -> AppPaths:
+    """Return stable application paths without repeating directory I/O."""
+    return _app_paths(PROJECT_ROOT)
 
 
 def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -47,9 +54,9 @@ def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
 def load_config() -> dict[str, Any]:
     config_path = PROJECT_ROOT / "config.json"
     local_path = PROJECT_ROOT / "config.local.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config = json.loads(config_path.read_text(encoding="utf-8-sig"))
     if local_path.exists():
-        local = json.loads(local_path.read_text(encoding="utf-8"))
+        local = json.loads(local_path.read_text(encoding="utf-8-sig"))
         config = _merge(config, local)
     return config
 

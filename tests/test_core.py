@@ -28,7 +28,7 @@ from assistant_app.audio import (
 from assistant_app.tts import SpeechSynthesizer
 from assistant_app.workers.tts_worker import AlternateTTSWorker
 from assistant_app.workers.cosyvoice_worker import CosyVoiceWorker
-from assistant_app.config import AppPaths, save_local_settings
+from assistant_app.config import AppPaths, load_config, save_local_settings
 from assistant_app.components import (
     COMPONENTS,
     component_installed,
@@ -37,6 +37,7 @@ from assistant_app.components import (
     missing_startup_components,
 )
 from assistant_app.providers import HybridModelClient, KimiResponse
+from assistant_app.performance import record_timing
 from assistant_app.secrets import (
     key_configuration_status,
     load_kimi_key,
@@ -46,8 +47,6 @@ from assistant_app.secrets import (
 from assistant_app.skills import LOCAL_SKILLS, match_local_skill
 from assistant_app.skills import SKILL_CATALOG, SKILL_CATEGORY_ORDER
 from assistant_app.tools import ToolRegistry, ToolResult
-from assistant_app.gui import AssistantWindow
-from assistant_app.rounded_gui import RoundedAssistantWindow
 
 
 ROUTING = {
@@ -178,29 +177,6 @@ class LearnedActionsAndPermissionTests(unittest.TestCase):
             finally:
                 database.close()
 
-    def test_later_thinking_cue_never_reuses_first_stage_phrase(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        window.thinking_first_filler_texts = ["我看看。"]
-        window.thinking_followup_texts = ["稍等一下哦。"]
-        window.thinking_filler_texts = ["我看看。", "稍等一下哦。"]
-        window.thinking_filler_max_count = 2
-        window.thinking_filler_interval = 0.0
-        window.thinking_long_wait_after_count = 99
-        window.thinking_long_wait_texts = {}
-        window._thinking_progress_task_started = 1.0
-        window._thinking_progress_count = 0
-        window._thinking_action_context = ""
-        window._last_progress_speech_at = 0.0
-        window.closing = False
-        window._active_task_started = 1.0
-        window.root = Mock()
-        window.status = Mock()
-        window._thinking_audio_done = threading.Event()
-        spoken: list[str] = []
-        window._thinking_voice_clip = lambda text, *_args: spoken.append(text) or Path("cue.wav")
-        with patch("assistant_app.gui.play_wav_file"):
-            window._thinking_filler_worker(1.0, threading.Event())
-        self.assertEqual(spoken, ["我看看。", "稍等一下哦。"])
 
 
 class RouterTests(unittest.TestCase):
@@ -371,6 +347,17 @@ class TTSConfigurationTests(unittest.TestCase):
         self.assertIn("Local launcher compilation is disabled by default.", build_script)
         self.assertNotIn("gh release create", build_script)
         self.assertNotIn("refs/tags", build_script)
+        self.assertNotIn("customtkinter", Path("requirements-release.txt").read_text(encoding="utf-8"))
+        self.assertNotIn("pystray", Path("requirements-release.txt").read_text(encoding="utf-8"))
+
+    def test_local_version_archive_uses_only_committed_git_content(self) -> None:
+        archive_script = Path("scripts/archive-local-version.ps1").read_text(encoding="utf-8")
+        self.assertIn("git -C $projectRoot archive", archive_script)
+        self.assertIn("bundle create $temporaryBundle beta", archive_script)
+        self.assertNotIn("bundle create $temporaryBundle --all", archive_script)
+        self.assertIn('git -C $projectRoot show "${commitHash}:assistant_app/version.py"', archive_script)
+        self.assertNotIn("config.local.json", archive_script)
+        self.assertNotIn("api_key.txt", archive_script)
 
     def setUp(self) -> None:
         self.tts = SpeechSynthesizer(
@@ -482,252 +469,12 @@ class TTSConfigurationTests(unittest.TestCase):
         self.assertEqual(requests[0]["leading_silence_ms"], 320)
         self.assertEqual(requests[0]["trailing_silence_ms"], 420)
 
-    def test_preload_prepares_all_thinking_fillers_for_selected_voice(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        window.tts = Mock()
-        window.goodbye_text = "拜拜。"
-        window.goodbye_cache_dir = Path("voice-cache")
-        window.wake_response_texts = ["我在呢。"]
-        window.interrupt_response_texts = ["嗯？"]
-        window.thinking_filler_texts = ["我想想。", "稍等一下哦。"]
-        window.thinking_long_wait_texts = {"general": "还需要一点时间。"}
-        window.thinking_completion_texts = ["我处理好了。"]
 
-        window._prepare_voice_clips()
 
-        calls = window.tts.synthesize_cached_voice_clip.call_args_list
-        self.assertEqual(len(calls), 9)
-        self.assertEqual(calls[0].args[2], "api-reconnecting")
-        self.assertEqual(calls[1].args[2], "api-unavailable")
-        self.assertEqual(calls[5].args[2], "thinking-filler-01")
-        self.assertEqual(calls[6].args[2], "thinking-filler-02")
-        self.assertEqual(calls[7].args[2], "thinking-long-general")
-        self.assertEqual(calls[8].args[2], "thinking-complete-01")
-        self.assertEqual(calls[-1].kwargs["leading_silence_ms"], 320)
-        self.assertEqual(calls[-1].kwargs["trailing_silence_ms"], 420)
 
-    def test_slow_voice_task_plays_prepared_filler_but_fast_task_does_not(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        window.thinking_filler_texts = ["我想想。"]
-        window.thinking_filler_max_count = 1
-        window.thinking_filler_interval = 0.0
-        window.thinking_long_wait_after_count = 99
-        window.thinking_long_wait_texts = {}
-        window._thinking_progress_task_started = 12.0
-        window._thinking_progress_count = 0
-        window._thinking_action_context = ""
-        window._last_progress_speech_at = 0.0
-        window.closing = False
-        window._active_task_started = 12.0
-        window.goodbye_cache_dir = Path("voice-cache")
-        window.tts = Mock()
-        window.tts.cached_voice_clip_path.return_value = Path("prepared.wav")
-        window.tts._cached_clip_is_audible.return_value = True
-        window.root = Mock()
-        window.status = Mock()
-        window._thinking_audio_done = threading.Event()
-        window._thinking_audio_done.set()
 
-        with (
-            patch("assistant_app.gui.Path.is_file", return_value=True),
-            patch("assistant_app.gui.play_wav_file") as play,
-        ):
-            window._thinking_filler_worker(12.0, threading.Event())
-            play.assert_called_once_with(Path("prepared.wav"))
 
-            stopped = threading.Event()
-            stopped.set()
-            window._thinking_filler_worker(12.0, stopped)
-            play.assert_called_once()
-        self.assertTrue(window._thinking_audio_done.is_set())
 
-    def test_thinking_fillers_wait_full_interval_after_each_spoken_clip(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        window.thinking_filler_texts = ["我想想。", "稍等一下。"]
-        window.thinking_filler_max_count = 2
-        window.thinking_filler_interval = 4.0
-        window.thinking_long_wait_after_count = 99
-        window.thinking_long_wait_texts = {}
-        window._thinking_progress_task_started = 20.0
-        window._thinking_progress_count = 0
-        window._thinking_action_context = ""
-        window._last_progress_speech_at = 0.0
-        window.closing = False
-        window._active_task_started = 20.0
-        window.goodbye_cache_dir = Path("voice-cache")
-        window.tts = Mock()
-        window.tts.cached_voice_clip_path.side_effect = [
-            Path("first.wav"),
-            Path("second.wav"),
-        ]
-        window.tts._cached_clip_is_audible.return_value = True
-        window.root = Mock()
-        window.status = Mock()
-        window._thinking_audio_done = threading.Event()
-        window._thinking_audio_done.set()
-
-        class RecordingStop:
-            def __init__(self):
-                self.waits = []
-                self.clock = 0.0
-
-            def wait(self, seconds):
-                self.waits.append(seconds)
-                self.clock += seconds
-                return False
-
-            def is_set(self):
-                return False
-
-        stop = RecordingStop()
-        with (
-            patch("assistant_app.gui.random.shuffle", side_effect=lambda values: None),
-            patch("assistant_app.gui.time.monotonic", side_effect=lambda: stop.clock),
-            patch("assistant_app.gui.Path.is_file", return_value=True),
-            patch("assistant_app.gui.play_wav_file") as play,
-        ):
-            window._thinking_filler_worker(20.0, stop)  # type: ignore[arg-type]
-
-        self.assertAlmostEqual(sum(stop.waits), 8.0)
-        self.assertEqual(
-            play.call_args_list,
-            [call(Path("first.wav")), call(Path("second.wav"))],
-        )
-
-    def test_screen_action_notice_resets_the_silence_interval(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        window.thinking_filler_texts = ["我想想。"]
-        window.thinking_filler_max_count = 1
-        window.thinking_filler_interval = 4.0
-        window.thinking_long_wait_after_count = 99
-        window.thinking_long_wait_texts = {}
-        window._thinking_progress_task_started = 30.0
-        window._thinking_progress_count = 0
-        window._thinking_action_context = "我先看一下屏幕。"
-        window._last_progress_speech_at = 5.0
-        window.closing = False
-        window._active_task_started = 30.0
-        window._action_notice_task_started = 30.0
-        window._action_notice_done = threading.Event()
-        window._action_notice_done.set()
-        window.goodbye_cache_dir = Path("voice-cache")
-        window.tts = Mock()
-        window.tts.cached_voice_clip_path.return_value = Path("second.wav")
-        window.tts._cached_clip_is_audible.return_value = True
-        window.root = Mock()
-        window.status = Mock()
-        window._thinking_audio_done = threading.Event()
-        window._thinking_audio_done.set()
-
-        class RecordingStop:
-            def __init__(self):
-                self.waits = []
-                self.clock = 5.0
-
-            def wait(self, seconds):
-                self.waits.append(seconds)
-                self.clock += seconds
-                return False
-
-            def is_set(self):
-                return False
-
-        stop = RecordingStop()
-        with (
-            patch("assistant_app.gui.random.shuffle", side_effect=lambda values: None),
-            patch("assistant_app.gui.time.monotonic", side_effect=lambda: stop.clock),
-            patch("assistant_app.gui.Path.is_file", return_value=True),
-            patch("assistant_app.gui.play_wav_file") as play,
-        ):
-            window._thinking_filler_worker(30.0, stop)  # type: ignore[arg-type]
-
-        self.assertAlmostEqual(sum(stop.waits), 4.0)
-        play.assert_called_once_with(Path("second.wav"))
-        window.tts.cached_voice_clip_path.assert_called_once()
-
-    def test_long_wait_reason_matches_current_task_context(self) -> None:
-        self.assertEqual(
-            AssistantWindow._thinking_context_kind("我先看一下屏幕。"),
-            "screen",
-        )
-        self.assertEqual(
-            AssistantWindow._thinking_context_kind("我去查查网页资料。"),
-            "web",
-        )
-        self.assertEqual(
-            AssistantWindow._thinking_context_kind("正在执行电脑操作。"),
-            "action",
-        )
-        self.assertEqual(AssistantWindow._thinking_context_kind("我想一想。"), "general")
-
-    def test_live_generated_progress_clip_is_kept_for_future_reuse(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        window.goodbye_cache_dir = Path("voice-cache")
-        window.tts = Mock()
-        with tempfile.TemporaryDirectory() as temporary:
-            clip = Path(temporary) / "thinking-dynamic.wav"
-            window.tts.cached_voice_clip_path.return_value = clip
-            window.tts._cached_clip_is_audible.return_value = True
-
-            def generate(*_args, **_kwargs):
-                clip.write_bytes(b"persistent voice clip")
-                return clip
-
-            window.tts.synthesize_cached_voice_clip.side_effect = generate
-            first = window._thinking_voice_clip(
-                "这个步骤需要额外检查。",
-                "thinking-dynamic-check",
-            )
-            second = window._thinking_voice_clip(
-                "这个步骤需要额外检查。",
-                "thinking-dynamic-check",
-            )
-
-        self.assertEqual(first, clip)
-        self.assertEqual(second, clip)
-        window.tts.synthesize_cached_voice_clip.assert_called_once()
-        self.assertEqual(
-            window.tts.synthesize_cached_voice_clip.call_args.kwargs["trailing_silence_ms"],
-            420,
-        )
-
-    def test_completed_long_task_announces_completion_before_answer(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        task_started = 45.0
-        window._thinking_audio_done = threading.Event()
-        window._thinking_audio_done.set()
-        window._action_notice_done = threading.Event()
-        window._action_notice_done.set()
-        window._action_notice_task_started = task_started
-        window._thinking_progress_task_started = task_started
-        window._thinking_progress_count = 1
-        window.thinking_completion_texts = ["我处理好了。"]
-        window.closing = False
-        window._active_task_started = task_started
-        window.root = Mock()
-        window.tts = Mock()
-        window.tts.speak.return_value = {
-            "chunks": 1,
-            "first_audio_seconds": 0.1,
-            "generation_seconds": 0.2,
-        }
-        events = []
-        window._thinking_voice_clip = Mock(
-            side_effect=lambda *_args, **_kwargs: events.append("prepare") or Path("done.wav")
-        )
-        window.tts.speak.side_effect = lambda *_args, **_kwargs: events.append("answer") or {
-            "chunks": 1,
-            "first_audio_seconds": 0.1,
-            "generation_seconds": 0.2,
-        }
-
-        with (
-            patch("assistant_app.gui.random.randrange", return_value=0),
-            patch("assistant_app.gui.play_wav_file", side_effect=lambda _path: events.append("complete")),
-        ):
-            window._speak_worker("这是最终答案。", "coherent", "voice", task_started, 0.2, 3.0)
-
-        self.assertEqual(events, ["prepare", "complete", "answer"])
 
     def test_mimo_preload_announces_completion_with_selected_engine(self) -> None:
         worker = AlternateTTSWorker()
@@ -793,138 +540,11 @@ class TTSConfigurationTests(unittest.TestCase):
             self.assertTrue(np.all(rendered[-24 * 180 :] == 0))
             self.assertGreater(np.max(np.abs(rendered[24 * 220 : -24 * 180])), 1000)
 
-    def test_title_bar_close_is_bound_to_tray_minimize(self) -> None:
-        source = Path("assistant_app/gui.py").read_text(encoding="utf-8")
-        self.assertIn(
-            'self.root.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)',
-            source,
-        )
-        self.assertIn('self.root.bind("<Unmap>"', source)
-        self.assertIn('self.root.bind("<Map>"', source)
-        self.assertIn("self.root.after(10, self._ensure_tray_icon)", source)
 
-    def test_tray_icon_remains_while_window_is_visible_or_hidden(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        persistent_icon = object()
-        window.closing = False
-        window._tray_icon = persistent_icon
-        window._ensure_tray_icon = Mock()
-        window.root = Mock()
-        window.status = Mock()
 
-        window._minimize_to_tray()
-        window.root.withdraw.assert_called_once_with()
-        self.assertIs(window._tray_icon, persistent_icon)
 
-        window._restore_from_tray()
-        self.assertIs(window._tray_icon, persistent_icon)
-        window.root.deiconify.assert_called_once_with()
 
-    def test_minimized_window_is_revealed_after_layout_finishes(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        window.closing = False
-        window._window_restore_pending = False
-        window._window_restore_job = None
-        window.root = Mock()
-        window.root.state.return_value = "iconic"
-        event = SimpleNamespace(widget=window.root)
 
-        window._prepare_window_restore(event)
-
-        self.assertTrue(window._window_restore_pending)
-        window.root.attributes.assert_called_with("-alpha", 0.0)
-
-        window.root.after.return_value = "restore-job"
-        window._complete_window_restore(event)
-        window.root.after.assert_called_with(32, window._show_restored_window)
-
-        window._show_restored_window()
-        window.root.attributes.assert_called_with("-alpha", 1.0)
-        self.assertFalse(window._window_restore_pending)
-
-    def test_skill_sidebar_lists_all_skills_and_optional_adapters_are_disabled(self) -> None:
-        production = json.loads(Path("config.json").read_text(encoding="utf-8"))
-        expected = {definition.id for definition in SKILL_CATALOG}
-        self.assertEqual(set(production["skills"]), expected)
-        optional = {"desk-lamp", "starrail-dailies"}
-        self.assertTrue(all(not production["skills"][name] for name in optional))
-        self.assertTrue(all(
-            enabled for name, enabled in production["skills"].items() if name not in optional
-        ))
-        source = Path("assistant_app/rounded_gui.py").read_text(encoding="utf-8")
-        self.assertIn('text="技能"', source)
-        self.assertIn("CTkScrollableFrame", source)
-        self.assertIn("for definition in SKILL_CATALOG", source)
-        self.assertIn('text=f"已学习 {learned}"', source)
-        self.assertIn('text=f"技能库 {library}"', source)
-        self.assertIn("_render_skill_sidebar", source)
-        self.assertIn("_render_favorite_sidebar", source)
-        self.assertIn("_toggle_skill_sidebar_visibility", source)
-        self.assertIn("_toggle_favorite_sidebar_visibility", source)
-        self.assertIn("_toggle_skill_favorite", source)
-        self.assertIn("_select_skill_category", source)
-        self.assertIn("self._skill_sidebar_category", source)
-        self.assertIn('(\"全部\", *SKILL_CATEGORY_ORDER)', source)
-        self.assertIn("_schedule_skill_panel_refresh", source)
-        self.assertIn("self._skill_cards = {}", source)
-        self.assertIn("self._favorite_cards = {}", source)
-        self.assertIn("_schedule_skill_scroll_reset", source)
-        self.assertIn("canvas.yview_moveto(0.0)", source)
-        self.assertIn("_save_ui_setting_async", source)
-        self.assertIn("_skill_count_label", source)
-        self.assertIn("_open_wake_word_settings", source)
-        self.assertIn("_open_xiaomi_home_settings", source)
-        self.assertIn("_open_starrail_settings", source)
-        self.assertIn("_open_continuous_conversation_settings", source)
-        self.assertNotIn("def _open_skill_manager", source)
-        self.assertNotIn("def _open_component_page", source)
-        self.assertNotIn("self.schedule_button", source)
-        self.assertNotIn("self.permissions_button", source)
-        self.assertNotIn("self.continuous_button", source)
-        self.assertNotIn("xiaomi-token-setup", expected)
-        self.assertEqual(
-            production["ui"],
-            {
-                "skill_sidebar_expanded": True,
-                "favorite_sidebar_expanded": False,
-                "favorite_skills": [],
-            },
-        )
-        self.assertEqual(
-            set(SKILL_CATEGORY_ORDER),
-            {definition.category for definition in SKILL_CATALOG},
-        )
-        xiaomi = next(skill for skill in SKILL_CATALOG if skill.id == "desk-lamp")
-        self.assertEqual(xiaomi.name, "小米智能家居")
-        self.assertIn("setup_xiaomi_token", xiaomi.tools)
-        starrail = next(skill for skill in SKILL_CATALOG if skill.id == "starrail-dailies")
-        self.assertEqual(
-            starrail.project_url,
-            "https://github.com/moesnow/March7thAssistant",
-        )
-
-    def test_both_skill_sidebars_can_stay_open(self) -> None:
-        window = RoundedAssistantWindow.__new__(RoundedAssistantWindow)
-        window._skill_sidebar_expanded = True
-        window._favorite_sidebar_expanded = False
-        window.config = {"ui": {}}
-        window._animate_sidebar_visibility = Mock()
-        window._save_ui_setting_async = Mock()
-
-        window._toggle_favorite_sidebar_visibility()
-
-        self.assertTrue(window._skill_sidebar_expanded)
-        self.assertTrue(window._favorite_sidebar_expanded)
-        window._animate_sidebar_visibility.assert_called_once_with("favorite", True)
-        window._save_ui_setting_async.assert_called_once_with(
-            "favorite_sidebar_expanded", True
-        )
-
-    def test_api_key_manager_is_a_primary_window_action(self) -> None:
-        source = Path("assistant_app/rounded_gui.py").read_text(encoding="utf-8")
-        self.assertIn("self.api_keys_button = ctk.CTkButton", source)
-        self.assertIn("command=self._open_api_key_page", source)
-        self.assertNotIn('text="管理 API 密钥"', source)
 
     def test_local_settings_batch_is_written_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -943,214 +563,33 @@ class TTSConfigurationTests(unittest.TestCase):
         self.assertFalse(stored["skills"]["wake-word"])
         self.assertEqual(stored["ui"]["favorite_skills"], ["wake-word"])
 
-    def test_gui_workers_skip_duplicate_tts_initialization(self) -> None:
-        gui_source = Path("assistant_app/gui.py").read_text(encoding="utf-8")
-        cli_source = Path("assistant_app/cli.py").read_text(encoding="utf-8")
-        self.assertEqual(gui_source.count("include_tts=False"), 2)
-        self.assertIn(
-            'SpeechSynthesizer(config["tts"]) if include_tts else None',
-            cli_source,
-        )
-
-    def test_gui_prepares_and_reuses_background_runtime(self) -> None:
-        source = Path("assistant_app/gui.py").read_text(encoding="utf-8")
-        self.assertIn('name="maomao-agent"', source)
-        self.assertIn("self._ensure_agent_runtime()", source)
-        self.assertIn("self._agent_task_queue.put", source)
-        self.assertIn("agent.tools.cleanup_temporary_screenshots()", source)
-
-    def test_gui_reuses_one_database_for_ui_queries(self) -> None:
-        source = Path("assistant_app/gui.py").read_text(encoding="utf-8")
-        self.assertIn("self._ui_database = Database(app_paths().database)", source)
-        self.assertIn("self._ui_database.due_scheduled_tasks(limit=1)", source)
-        self.assertIn("self._ui_database.usage_summary", source)
-        self.assertIn("ui_database.close()", source)
-
-    def test_xiaomi_settings_lists_device_without_exposing_token(self) -> None:
+    def test_packaged_config_accepts_utf8_bom(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            token_file = Path(directory) / "xiaomi_token.txt"
-            token_file.write_text(
-                "did=1234567890\n"
-                "name=米家台灯2\n"
-                "model=yeelink.light.lamp4\n"
-                "ip=192.0.2.10\n"
-                f"token={'a' * 32}\n",
-                encoding="utf-8",
+            root = Path(directory)
+            (root / "config.json").write_text(
+                '{"distribution":{"channel":"beta"}}',
+                encoding="utf-8-sig",
             )
-            devices = RoundedAssistantWindow._read_xiaomi_devices(token_file)
-
-        self.assertEqual(len(devices), 1)
-        self.assertEqual(devices[0]["name"], "米家台灯2")
-        self.assertEqual(devices[0]["ip"], "192.0.2.10")
-        self.assertNotIn("token", devices[0])
-
-    def test_schedule_manager_has_daily_and_silent_controls(self) -> None:
-        source = Path("assistant_app/rounded_gui.py").read_text(encoding="utf-8")
-        self.assertIn('text="定时任务"', source)
-        self.assertIn('values=["仅一次", "每天"]', source)
-        self.assertIn('text="静默执行（不播报、不弹出窗口）"', source)
-        self.assertIn("_refresh_schedule_manager", source)
-
-    def test_silent_schedule_completion_never_enters_chat_or_tts(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        window._scheduled_task_running = True
-        window._append_chat = Mock()
-        window._refresh_schedule_manager = Mock()
-
-        window._finish_scheduled_task(3, "关灯", True, True, "操作已完成")
-
-        self.assertFalse(window._scheduled_task_running)
-        window._append_chat.assert_not_called()
-        window._refresh_schedule_manager.assert_called_once_with()
-
-        window._refresh_schedule_manager.reset_mock()
-        window._finish_scheduled_task(4, "关灯", False, True, "操作已完成")
-        window._append_chat.assert_called_once()
-        self.assertNotIn("speak", str(window._append_chat.mock_calls))
-
-    def test_multiple_wake_words_are_parsed_and_reset_old_voice_templates(self) -> None:
-        self.assertEqual(
-            AssistantWindow._parse_wake_words(" 猫猫，喵喵助手；猫 猫\n小七 "),
-            ["猫猫", "喵喵助手", "小七"],
-        )
-        with self.assertRaises(ValueError):
-            AssistantWindow._parse_wake_words("一,二,三,四,五,六")
-
-        with tempfile.TemporaryDirectory() as temporary:
-            template_path = Path(temporary) / "wake-templates.npz"
-            template_path.write_bytes(b"old templates")
-            listener = WakeWordListener(
-                {
-                    "enabled": False,
-                    "keyword": "猫猫",
-                    "aliases": ["猫猫"],
-                    "template_path": str(template_path),
-                },
-                lambda: None,
+            (root / "config.local.json").write_text(
+                '{"distribution":{"edition":"lite"}}',
+                encoding="utf-8-sig",
             )
-            listener.verifier.templates = [np.zeros((3, 26), dtype=np.float32)] * 3
-            self.assertTrue(listener.enrolled)
+            with patch("assistant_app.config.PROJECT_ROOT", root):
+                config = load_config()
+        self.assertEqual(config["distribution"], {"channel": "beta", "edition": "lite"})
 
-            listener.update_keywords(["猫猫", "喵喵助手"], clear_enrollment=True)
 
-            self.assertEqual(listener.keyword, "猫猫")
-            self.assertEqual(listener.aliases, ["猫猫", "喵喵助手"])
-            self.assertFalse(listener.enrolled)
-            self.assertFalse(template_path.exists())
 
-    def test_skill_total_counts_enabled_items(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        window.config = {
-            "skills": {
-                definition.id: definition.id != "wake-word"
-                for definition in SKILL_CATALOG
-            }
-        }
-        window._skill_count_label = Mock()
 
-        window._refresh_skill_count()
 
-        self.assertEqual(
-            window._skill_count_label.configure.call_args.kwargs["text"],
-            f"已开启 {len(SKILL_CATALOG) - 1} / 共 {len(SKILL_CATALOG)} 个",
-        )
 
-    def test_tray_menu_can_restart_without_rebuilding_the_launcher(self) -> None:
-        gui_source = Path("assistant_app/gui.py").read_text(encoding="utf-8")
-        helper_source = Path("assistant_app/restart_helper.py").read_text(encoding="utf-8")
-        self.assertIn('"重启猫猫"', gui_source)
-        self.assertIn('"assistant_app.restart_helper"', gui_source)
-        self.assertNotIn('project_root / "MaoMao.exe"', gui_source)
-        self.assertIn("WaitForSingleObject", helper_source)
-        self.assertIn('[sys.executable, "-m", "assistant_app.qt_quick.app"]', helper_source)
 
-    def test_preload_button_keeps_loading_label_until_completion(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        window.preload_button = Mock()
-        window.preload_enabled = Mock()
-        window.preload_enabled.get.return_value = True
-        window.config = {"skills": {"wake-word": True}}
-        window._preload_loading = True
-        window._refresh_preload_button()
-        self.assertEqual(
-            window.preload_button.configure.call_args.kwargs["text"],
-            "加载中",
-        )
 
-        window._preload_loading = False
-        window._refresh_preload_button()
-        self.assertEqual(window.preload_button.configure.call_args.kwargs["text"], "开")
 
-    def test_startup_waits_for_preload_before_starting_wake_listener(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        window.preload_enabled = Mock()
-        window.preload_enabled.get.return_value = True
-        window.config = {"skills": {"wake-word": True}}
-        window._set_preload_loading = Mock()
-        window._start_tts_warmup = Mock()
-        window.wake_listener = Mock()
-        window.root = Mock()
 
-        window._start_background_services(warmup=True)
 
-        window._set_preload_loading.assert_called_once_with(True)
-        window.root.after.assert_called_once_with(100, window._start_tts_warmup)
-        window.wake_listener.start.assert_not_called()
 
-        window._finish_tts_warmup_status = AssistantWindow._finish_tts_warmup_status.__get__(
-            window, AssistantWindow
-        )
-        window.status = Mock()
-        window.asr_mode = Mock()
-        window._wake_status_value = "正在监听猫猫"
-        window.wake_capture_enabled = Mock()
-        window.wake_capture_enabled.get.return_value = True
-        window._finish_tts_warmup_status()
-        window.wake_listener.start.assert_called_once_with()
-        window.wake_listener.resume.assert_called_once_with()
 
-    def test_wake_capture_button_updates_listener_and_persists_setting(self) -> None:
-        class BooleanValue:
-            def __init__(self, value: bool) -> None:
-                self.value = value
-
-            def get(self) -> bool:
-                return self.value
-
-            def set(self, value: bool) -> None:
-                self.value = value
-
-        window = AssistantWindow.__new__(AssistantWindow)
-        window.wake_capture_enabled = BooleanValue(True)
-        window.wake_listener = SimpleNamespace(
-            keyword="猫猫",
-            set_capture_enabled=Mock(),
-        )
-        window.config = {"wake_word": {}, "skills": {}}
-        window.status = Mock()
-
-        with patch("assistant_app.gui.save_local_settings") as save:
-            window._toggle_wake_capture()
-
-        self.assertFalse(window.wake_capture_enabled.get())
-        window.wake_listener.set_capture_enabled.assert_called_once_with(False)
-        self.assertFalse(window.config["wake_word"]["capture_enabled"])
-        save.assert_called_once_with(
-            {
-                "wake_word": {"capture_enabled": False},
-                "skills": {"wake-word": False},
-            }
-        )
-        window.status.set.assert_called_once_with("唤醒监听已关闭 · 手动录音仍可使用")
-
-    def test_rounded_wake_status_refreshes_settings_controls(self) -> None:
-        window = RoundedAssistantWindow.__new__(RoundedAssistantWindow)
-        window.wake_capture_enabled = SimpleNamespace(get=lambda: False)
-        window._sync_wake_settings_controls = Mock()
-
-        window._refresh_wake_capture_button()
-
-        window._sync_wake_settings_controls.assert_called_once_with()
 
     def test_goodbye_cache_is_unique_per_engine_and_voice(self) -> None:
         tts = SpeechSynthesizer({"enabled": False, "backend": "mimo-api", "mimo_voice": "冰糖"})
@@ -1345,6 +784,86 @@ class StorageAndBudgetTests(unittest.TestCase):
         self.database.remember("我常用的浏览器是 Edge")
         found = self.database.search_memories("打开浏览器")
         self.assertEqual(found[0]["content"], "我常用的浏览器是 Edge")
+
+    def test_memory_search_uses_fts_and_tracks_updates(self) -> None:
+        if not self.database._fts_available:
+            self.skipTest("SQLite FTS5 is unavailable")
+        memory_id = self.database.remember(
+            "The preferred browser is Firefox", "browser preference", "preference.browser"
+        )
+        self.assertEqual(
+            self.database.search_memories("preferred browser")[0]["id"],
+            memory_id,
+        )
+        self.database.remember(
+            "The preferred browser is Edge", "browser preference", "preference.browser"
+        )
+        found = self.database.search_memories("preferred browser")
+        self.assertEqual(found[0]["content"], "The preferred browser is Edge")
+
+    def test_two_character_memory_search_keeps_like_fallback(self) -> None:
+        self.database.remember("猫猫喜欢晒太阳")
+        self.assertEqual(
+            self.database.search_memories("猫猫")[0]["content"],
+            "猫猫喜欢晒太阳",
+        )
+
+    def test_memory_read_cache_is_invalidated_by_another_connection(self) -> None:
+        path = Path(self.temp.name) / "test.db"
+        self.assertEqual(self.database.list_memories(), [])
+        second = Database(path)
+        try:
+            second.remember("external update")
+        finally:
+            second.close()
+        self.assertEqual(self.database.list_memories()[0]["content"], "external update")
+
+    def test_conversation_exchange_is_written_in_one_commit(self) -> None:
+        with patch.object(self.database, "_commit", wraps=self.database._commit) as commit:
+            self.database.add_messages(
+                "session",
+                (("user", "question"), ("assistant", "answer")),
+            )
+        commit.assert_called_once_with()
+        self.assertEqual(
+            [row["content"] for row in self.database.recent_messages("session", 2)],
+            ["question", "answer"],
+        )
+
+    def test_tool_schemas_are_reused_until_skill_settings_change(self) -> None:
+        root = Path(self.temp.name)
+        screenshots = root / "screenshots"
+        screenshots.mkdir(exist_ok=True)
+        paths = AppPaths(root, root, root / "test.db", screenshots, root / "api_key.txt")
+        tools = ToolRegistry(paths, self.database, "test", lambda *_: True)
+        with patch.object(ToolRegistry, "_schema", wraps=ToolRegistry._schema) as schema:
+            first = tools.schemas
+            built = schema.call_count
+            second = tools.schemas
+        self.assertGreater(built, 0)
+        self.assertEqual(schema.call_count, built)
+        self.assertEqual(first, second)
+
+    def test_performance_log_contains_timing_metadata_only(self) -> None:
+        path = Path(self.temp.name) / "performance.jsonl"
+        with patch("assistant_app.performance._log_path", return_value=path):
+            record_timing("model.request", 0.012345, success=False)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(payload), {"timestamp", "event", "elapsed_ms", "success"}
+        )
+        self.assertEqual(payload["event"], "model.request")
+        self.assertEqual(payload["elapsed_ms"], 12.345)
+        self.assertFalse(payload["success"])
+
+    def test_performance_logging_never_breaks_operations(self) -> None:
+        blocked_parent = Path(self.temp.name) / "not-a-directory"
+        blocked_parent.write_text("occupied", encoding="utf-8")
+        with patch(
+            "assistant_app.performance._log_path",
+            return_value=blocked_parent / "performance.jsonl",
+        ):
+            record_timing("tool.execute", 0.001)
 
     def test_stable_memory_key_updates_instead_of_duplicating(self) -> None:
         first = self.database.remember(
@@ -1761,7 +1280,7 @@ class StorageAndBudgetTests(unittest.TestCase):
         ):
             result = tools._navigate_browser_humanlike("https://example.com/")
         self.assertIn("当前浏览器标签页", result)
-        popen.assert_called_once_with([r"C:\Edge\msedge.exe"])
+        self.assertEqual(popen.call_args_list[-1], call([r"C:\Edge\msedge.exe"]))
         system_open.assert_not_called()
         restore.assert_called_once_with(456)
         hotkey.assert_called_once_with("ctrl", "l")
@@ -2484,7 +2003,7 @@ class StorageAndBudgetTests(unittest.TestCase):
         screenshots = root / "screenshots-lifecycle"
         paths = AppPaths(root, root, root / "test.db", screenshots, root / "api_key.txt")
         tools = ToolRegistry(paths, self.database, "screenshot-lifecycle-test", lambda *_: True)
-        with patch("assistant_app.tools.ImageGrab.grab", return_value=Image.new("RGB", (64, 48))):
+        with patch("PIL.ImageGrab.grab", return_value=Image.new("RGB", (64, 48))):
             temporary = tools.execute("inspect_screen", {}, "temporary-shot")
             self.assertTrue(temporary.image_path.is_file())
             saved = tools.execute("save_screenshot", {}, "saved-shot")
@@ -2531,25 +2050,6 @@ class StorageAndBudgetTests(unittest.TestCase):
             PersonalAgent._is_simple_open_only("打开微信，然后告诉我天气", "open_app")
         )
 
-    def test_continuous_conversation_exit_phrases(self) -> None:
-        for phrase in (
-            "再见",
-            "那今天先这样，拜拜啦",
-            "okay, bye-bye 猫猫",
-            "已经没事了，谢谢",
-            "可以，可以，没你什么事了。",
-            "没有什么事情了",
-            "行了，没啥事儿啦",
-            "暂时没有别的事",
-            "好了，现在不需要你了",
-            "请停止对话吧",
-        ):
-            self.assertTrue(AssistantWindow._is_conversation_exit(phrase))
-        self.assertFalse(AssistantWindow._is_conversation_exit("继续帮我看看天气"))
-        for filler in ("嗯。", "嗯嗯", "呃", "哦", "啊啊", "好", "hmm"):
-            self.assertTrue(AssistantWindow._is_filler_only(filler))
-        self.assertFalse(AssistantWindow._is_filler_only("嗯，帮我开灯"))
-        self.assertFalse(AssistantWindow._is_filler_only("没有了"))
 
     def test_asr_language_tag_hallucinations_are_removed(self) -> None:
         noisy = " ".join(["<chinese>"] * 500)
@@ -2559,25 +2059,6 @@ class StorageAndBudgetTests(unittest.TestCase):
             "帮我开灯",
         )
 
-    def test_gui_discards_tag_only_transcription_before_submit(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        window.busy = True
-        window.record_button = Mock()
-        window.send_button = Mock()
-        window.timing = Mock()
-        window.status = Mock()
-        window.wake_listener = SimpleNamespace(keyword="猫猫")
-        window._continuous_session_active = True
-        window._continuous_listening = True
-        window._timing_summary = Mock(return_value="ASR 0.1s")
-        window._submit = Mock()
-
-        window._submit_transcription("<chinese> <chinese> <chinese>", 1.0, 0.1)
-
-        window._submit.assert_not_called()
-        self.assertFalse(window.busy)
-        self.assertFalse(window._continuous_session_active)
-        window.status.set.assert_called_once()
 
     def test_adaptive_voice_gate_rejects_transient_and_steady_noise(self) -> None:
         recorder = ButtonAudioRecorder(
@@ -2627,29 +2108,6 @@ class StorageAndBudgetTests(unittest.TestCase):
         self.assertLess(settled_at, 1.5)
         self.assertEqual(recorder._last_voice_at, settled_at)
 
-    def test_preload_announcement_is_the_last_warmup_step(self) -> None:
-        window = AssistantWindow.__new__(AssistantWindow)
-        events: list[str] = []
-        window.transcriber = Mock()
-        window.transcriber.warmup.side_effect = lambda: events.append("asr")
-        window.tts = Mock()
-        window.tts.engine_label = "测试语音"
-        window.tts.warmup.side_effect = lambda: events.append("announcement")
-        window.asr_mode = Mock()
-        window.asr_mode.get.return_value = "测试转写"
-        window._prepare_voice_clips = Mock(side_effect=lambda: events.append("clips"))
-        window._finish_tts_warmup_status = Mock(side_effect=lambda: events.append("finished"))
-        window._preload_generation = 1
-        window.preload_enabled = Mock()
-        window.preload_enabled.get.return_value = True
-        window.closing = False
-        window.status = Mock()
-        window.root = Mock()
-        window.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
-
-        window._warmup_worker(1)
-
-        self.assertEqual(events, ["asr", "clips", "announcement", "finished"])
 
     def test_voice_clip_rejects_silence_but_accepts_quiet_audio(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2707,6 +2165,82 @@ class StorageAndBudgetTests(unittest.TestCase):
     def test_cost_calculation_splits_cached_tokens(self) -> None:
         cost = BudgetManager.estimate_cost("kimi-k2.6", 1_000_000, 250_000, 100_000)
         self.assertAlmostEqual(cost, 7.85)
+
+    def test_budget_check_reads_all_limits_in_one_database_query(self) -> None:
+        database = Mock()
+        database.usage_snapshot.return_value = {
+            "today": 1.0,
+            "month": 2.0,
+            "task": 0.1,
+        }
+        manager = BudgetManager(
+            database,
+            {
+                "currency": "CNY",
+                "currency_symbol": "￥",
+                "daily_warning": 10,
+                "daily_hard_limit": 20,
+                "monthly_hard_limit": 100,
+                "per_task_hard_limit": 5,
+            },
+        )
+        status = manager.check_before_call("task-1")
+        database.usage_snapshot.assert_called_once_with("CNY", "task-1")
+        self.assertEqual((status.today, status.month), (1.0, 2.0))
+
+    def test_database_initialization_records_schema_and_query_indexes(self) -> None:
+        version = self.database.connection.execute("PRAGMA user_version").fetchone()[0]
+        indexes = {
+            row[1]
+            for row in self.database.connection.execute("PRAGMA index_list(api_usage)")
+        }
+        self.assertEqual(version, 2)
+        self.assertIn("idx_api_usage_currency_time", indexes)
+        self.assertIn("idx_api_usage_task_time", indexes)
+
+    def test_usage_snapshot_returns_day_month_and_task_totals_together(self) -> None:
+        self.database.log_usage("s", "task-1", "kimi-k2.6", 1, 0, 1, 0.25, "CNY")
+        self.database.log_usage("s", "task-2", "kimi-k2.6", 1, 0, 1, 0.50, "CNY")
+        snapshot = self.database.usage_snapshot("CNY", "task-1")
+        self.assertEqual(snapshot, {"today": 0.75, "month": 0.75, "task": 0.25})
+
+    def test_rolling_dtw_matches_the_previous_full_matrix_algorithm(self) -> None:
+        from scipy.spatial.distance import cdist
+
+        first = np.random.default_rng(1).normal(size=(18, 6)).astype(np.float32)
+        second = np.random.default_rng(2).normal(size=(15, 6)).astype(np.float32)
+        costs = cdist(first, second, metric="cosine")
+        rows, columns = costs.shape
+        totals = np.full((rows + 1, columns + 1), np.inf, dtype=np.float32)
+        steps = np.zeros((rows + 1, columns + 1), dtype=np.int32)
+        totals[0, 0] = 0.0
+        for row in range(1, rows + 1):
+            for column in range(1, columns + 1):
+                choices = (
+                    (totals[row - 1, column], steps[row - 1, column]),
+                    (totals[row, column - 1], steps[row, column - 1]),
+                    (totals[row - 1, column - 1], steps[row - 1, column - 1]),
+                )
+                best_total, best_steps = min(choices, key=lambda item: item[0])
+                totals[row, column] = best_total + costs[row - 1, column - 1]
+                steps[row, column] = best_steps + 1
+        expected = float(totals[rows, columns] / steps[rows, columns])
+        self.assertAlmostEqual(WakeVoiceVerifier._distance(first, second), expected, places=6)
+
+    def test_saved_wake_threshold_is_not_recalibrated_during_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "wake-templates.npz"
+            np.savez_compressed(
+                path,
+                template_0=np.ones((4, 3), dtype=np.float32),
+                template_1=np.ones((4, 3), dtype=np.float32),
+                template_2=np.ones((4, 3), dtype=np.float32),
+                threshold=np.array([0.46], dtype=np.float32),
+            )
+            with patch.object(WakeVoiceVerifier, "_calibrated_threshold") as calibrate:
+                verifier = WakeVoiceVerifier(path)
+        calibrate.assert_not_called()
+        self.assertAlmostEqual(verifier.threshold, 0.46, places=6)
 
     def test_legacy_usd_usage_is_migrated_without_mixing_currencies(self) -> None:
         self.database.close()

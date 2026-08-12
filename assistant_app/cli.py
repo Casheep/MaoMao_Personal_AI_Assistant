@@ -4,16 +4,6 @@ import argparse
 import sys
 import uuid
 
-from .agent import PersonalAgent
-from .audio import AudioRecorder, SpeechTranscriber, input_devices
-from .budget import BudgetExceeded, BudgetManager
-from .config import app_paths, load_config
-from .database import Database
-from .providers import HybridModelClient, KimiClient, MiMoClient
-from .secrets import load_kimi_key, load_mimo_key
-from .tools import ToolRegistry
-from .tts import SpeechSynthesizer
-
 
 def confirm_tool(name: str, arguments: dict) -> bool:
     print(f"\n[需要确认] 工具={name}")
@@ -24,48 +14,13 @@ def confirm_tool(name: str, arguments: dict) -> bool:
     return input("执行吗？输入 y 确认：").strip().lower() == "y"
 
 
-def build_agent(
-    config: dict,
-    session_id: str,
-    confirmation_callback=confirm_tool,
-    progress_callback=None,
-    cancel_event=None,
-    include_tts: bool = True,
-) -> tuple[PersonalAgent, Database, SpeechSynthesizer | None]:
-    paths = app_paths()
-    database = Database(paths.database)
-    budget = BudgetManager(database, config["api"])
-    key = load_kimi_key(paths.key_file)
-    kimi_client = KimiClient(key, config, database, budget, session_id)
-    mimo_client = MiMoClient(
-        load_mimo_key(paths.key_file), config, database, budget, session_id
-    )
-    client = HybridModelClient(kimi_client, mimo_client, config)
-    tools = ToolRegistry(
-        paths,
-        database,
-        session_id,
-        confirmation_callback,
-        application_config=config.get("applications", {}),
-        smart_home_config=config.get("smart_home", {}),
-        automation_config=config.get("automation", {}),
-        skills_config=config.get("skills", {}),
-        cancel_event=cancel_event,
-    )
-    agent = PersonalAgent(
-        config,
-        database,
-        client,
-        tools,
-        session_id,
-        progress_callback=progress_callback,
-        cancel_event=cancel_event,
-    )
-    tts = SpeechSynthesizer(config["tts"]) if include_tts else None
-    return agent, database, tts
-
-
 def run_check(config: dict) -> int:
+    from .audio import input_devices
+    from .config import app_paths
+    from .database import Database
+    from .secrets import load_kimi_key
+    from .tts import SpeechSynthesizer
+
     paths = app_paths()
     load_kimi_key(paths.key_file)
     database = Database(paths.database)
@@ -93,6 +48,9 @@ def run_check(config: dict) -> int:
 
 
 def run_tts_smoke(config: dict, output: str) -> int:
+    from .config import app_paths
+    from .tts import SpeechSynthesizer
+
     path = app_paths().root / output
     tts = SpeechSynthesizer(config["tts"])
     try:
@@ -107,6 +65,12 @@ def run_tts_smoke(config: dict, output: str) -> int:
 
 
 def run_api_smoke(config: dict, selection: str) -> int:
+    from .budget import BudgetManager
+    from .config import app_paths
+    from .database import Database
+    from .providers import KimiClient
+    from .secrets import load_kimi_key
+
     paths = app_paths()
     database = Database(paths.database)
     session_id = f"smoke-{uuid.uuid4().hex}"
@@ -146,10 +110,12 @@ def run_api_smoke(config: dict, selection: str) -> int:
 
 
 def run_once(config: dict, text: str, no_tts: bool) -> int:
+    from .runtime import build_agent
+
     if no_tts:
         config["tts"]["enabled"] = False
     session_id = uuid.uuid4().hex
-    agent, database, tts = build_agent(config, session_id)
+    agent, database, tts = build_agent(config, session_id, confirm_tool)
     assert tts is not None
     try:
         answer = agent.run(text, input_mode="text")
@@ -167,11 +133,16 @@ def run_once(config: dict, text: str, no_tts: bool) -> int:
 
 
 def interactive(text_only: bool, no_tts: bool) -> int:
+    from .audio import AudioRecorder, SpeechTranscriber
+    from .budget import BudgetExceeded
+    from .config import load_config
+    from .runtime import build_agent
+
     config = load_config()
     if no_tts:
         config["tts"]["enabled"] = False
     session_id = uuid.uuid4().hex
-    agent, database, tts = build_agent(config, session_id)
+    agent, database, tts = build_agent(config, session_id, confirm_tool)
     assert tts is not None
     recorder = AudioRecorder(
         int(config["audio"]["sample_rate"]), int(config["audio"]["channels"])
@@ -284,6 +255,8 @@ def main() -> int:
     parser.add_argument("--text-only", action="store_true", help="禁用录音入口")
     parser.add_argument("--no-tts", action="store_true", help="禁用语音播报")
     args = parser.parse_args()
+    from .config import load_config
+
     config = load_config()
     if args.check:
         return run_check(config)

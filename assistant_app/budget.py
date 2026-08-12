@@ -53,9 +53,10 @@ class BudgetManager:
         ) / 1_000_000
 
     def check_before_call(self, task_id: str) -> BudgetStatus:
-        today = self.database.usage_total("day", currency=self.currency)
-        month = self.database.usage_total("month", currency=self.currency)
-        task = self.database.usage_total("day", task_id=task_id, currency=self.currency)
+        usage = self.database.usage_snapshot(self.currency, task_id)
+        today = usage["today"]
+        month = usage["month"]
+        task = usage["task"]
         if today >= self.daily_hard:
             raise BudgetExceeded(
                 f"今日 API 费用已达到硬上限 {self.currency_symbol}{self.daily_hard:.2f}。"

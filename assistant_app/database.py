@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 
+SCHEMA_VERSION = 2
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -16,14 +19,55 @@ class Database:
         self.path = path
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
+        self._read_cache: dict[tuple[Any, ...], tuple[int, tuple[dict[str, Any], ...]]] = {}
+        self._fts_available = False
         self._initialize()
 
+    def _data_version(self) -> int:
+        return int(self.connection.execute("PRAGMA data_version").fetchone()[0])
+
+    def _invalidate_read_cache(self) -> None:
+        self._read_cache.clear()
+
+    def _commit(self) -> None:
+        self.connection.commit()
+        self._invalidate_read_cache()
+
+    def _cached_rows(
+        self,
+        key: tuple[Any, ...],
+        query: str,
+        parameters: tuple[Any, ...] = (),
+    ) -> list[dict[str, Any]]:
+        version = self._data_version()
+        cached = self._read_cache.get(key)
+        if cached is None or cached[0] != version:
+            rows = tuple(
+                dict(row) for row in self.connection.execute(query, parameters).fetchall()
+            )
+            cached = (version, rows)
+            self._read_cache[key] = cached
+        return [dict(row) for row in cached[1]]
+
     def _initialize(self) -> None:
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA foreign_keys=ON")
+        self.connection.execute("PRAGMA busy_timeout=5000")
+        version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+        if version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"数据库版本 {version} 高于当前程序支持的 {SCHEMA_VERSION}。"
+            )
+        if version == SCHEMA_VERSION:
+            self._fts_available = bool(
+                self.connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'"
+                ).fetchone()
+            )
+            return
+
         self.connection.executescript(
             """
-            PRAGMA journal_mode=WAL;
-            PRAGMA foreign_keys=ON;
-
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -101,6 +145,13 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_visual_action_shortcuts_recent
             ON visual_action_shortcuts(app_name, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_messages_session_recent
+            ON messages(session_id, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_memories_recent
+            ON memories(updated_at DESC);
+
             """
         )
         columns = {
@@ -150,7 +201,61 @@ class Database:
             ON memories(memory_key) WHERE memory_key <> ''
             """
         )
-        self.connection.commit()
+        self.connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_usage_currency_time
+            ON api_usage(currency, created_at)
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_usage_task_time
+            ON api_usage(task_id, currency, created_at)
+            """
+        )
+        self.connection.execute(
+            """
+            UPDATE api_usage
+            SET created_at = replace(created_at, ' ', 'T')
+            WHERE substr(created_at, 11, 1) = ' '
+            """
+        )
+        try:
+            self.connection.executescript(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                    content,
+                    tags,
+                    content='memories',
+                    content_rowid='id',
+                    tokenize='trigram'
+                );
+
+                CREATE TRIGGER IF NOT EXISTS memories_fts_insert AFTER INSERT ON memories BEGIN
+                    INSERT INTO memories_fts(rowid, content, tags)
+                    VALUES (new.id, new.content, new.tags);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS memories_fts_delete AFTER DELETE ON memories BEGIN
+                    INSERT INTO memories_fts(memories_fts, rowid, content, tags)
+                    VALUES ('delete', old.id, old.content, old.tags);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE ON memories BEGIN
+                    INSERT INTO memories_fts(memories_fts, rowid, content, tags)
+                    VALUES ('delete', old.id, old.content, old.tags);
+                    INSERT INTO memories_fts(rowid, content, tags)
+                    VALUES (new.id, new.content, new.tags);
+                END;
+
+                INSERT INTO memories_fts(memories_fts) VALUES ('rebuild');
+                """
+            )
+            self._fts_available = True
+        except sqlite3.OperationalError:
+            self._fts_available = False
+        self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        self._commit()
 
     def remember_visual_action(
         self,
@@ -203,7 +308,7 @@ class Database:
             "SELECT id FROM visual_action_shortcuts WHERE description=? AND app_name=?",
             (description, app_name),
         ).fetchone()
-        self.connection.commit()
+        self._commit()
         return int(row["id"]) if row is not None else 0
 
     def list_visual_actions(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -231,14 +336,14 @@ class Database:
             """,
             (utc_now(), int(shortcut_id)),
         )
-        self.connection.commit()
+        self._commit()
 
     def delete_visual_action(self, shortcut_id: int) -> None:
         self.connection.execute(
             "DELETE FROM visual_action_shortcuts WHERE id=?",
             (int(shortcut_id),),
         )
-        self.connection.commit()
+        self._commit()
 
     @staticmethod
     def _local_schedule_time(value: str | datetime) -> datetime:
@@ -283,20 +388,20 @@ class Database:
                 now,
             ),
         )
-        self.connection.commit()
+        self._commit()
         return int(cursor.lastrowid)
 
     def list_scheduled_tasks(self, include_disabled: bool = True) -> list[dict[str, Any]]:
         where = "" if include_disabled else "WHERE enabled = 1"
-        rows = self.connection.execute(
+        return self._cached_rows(
+            ("scheduled_tasks", include_disabled),
             f"""
             SELECT id, command, next_run_at, repeat_rule, silent, enabled,
                    last_run_at, last_status, last_result, created_at, updated_at
             FROM scheduled_tasks {where}
             ORDER BY enabled DESC, next_run_at ASC, id DESC
-            """
-        ).fetchall()
-        return [dict(row) for row in rows]
+            """,
+        )
 
     def due_scheduled_tasks(
         self,
@@ -360,7 +465,7 @@ class Database:
                     int(task_id),
                 ),
             )
-            self.connection.commit()
+            self._commit()
             claimed["scheduled_for"] = scheduled.isoformat(timespec="seconds")
             claimed["enabled"] = enabled
             claimed["next_run_at"] = next_run.isoformat(timespec="seconds")
@@ -388,7 +493,7 @@ class Database:
                 int(task_id),
             ),
         )
-        self.connection.commit()
+        self._commit()
 
     def cancel_scheduled_task(self, task_id: int) -> bool:
         cursor = self.connection.execute(
@@ -399,7 +504,7 @@ class Database:
             """,
             (utc_now(), int(task_id)),
         )
-        self.connection.commit()
+        self._commit()
         return bool(cursor.rowcount)
 
     def recover_interrupted_scheduled_tasks(self) -> int:
@@ -413,7 +518,7 @@ class Database:
             """,
             (utc_now(),),
         )
-        self.connection.commit()
+        self._commit()
         return int(cursor.rowcount)
 
     def delete_scheduled_task(self, task_id: int) -> bool:
@@ -421,15 +526,24 @@ class Database:
             "DELETE FROM scheduled_tasks WHERE id = ?",
             (int(task_id),),
         )
-        self.connection.commit()
+        self._commit()
         return bool(cursor.rowcount)
 
     def add_message(self, session_id: str, role: str, content: str) -> None:
-        self.connection.execute(
+        self.add_messages(session_id, ((role, content),))
+
+    def add_messages(
+        self,
+        session_id: str,
+        messages: tuple[tuple[str, str], ...] | list[tuple[str, str]],
+    ) -> None:
+        """Persist one conversation exchange with a single transaction."""
+        now = utc_now()
+        self.connection.executemany(
             "INSERT INTO messages(session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (session_id, role, content, utc_now()),
+            ((session_id, role, content, now) for role, content in messages),
         )
-        self.connection.commit()
+        self._commit()
 
     def recent_messages(self, session_id: str, limit: int) -> list[dict[str, str]]:
         rows = self.connection.execute(
@@ -447,7 +561,7 @@ class Database:
             "DELETE FROM messages WHERE session_id = ?",
             (session_id,),
         )
-        self.connection.commit()
+        self._commit()
         return int(cursor.rowcount)
 
     def remember(self, content: str, tags: str = "", memory_key: str = "") -> int:
@@ -467,7 +581,7 @@ class Database:
                     """,
                     (content, tags, now, int(existing["id"])),
                 )
-                self.connection.commit()
+                self._commit()
                 return int(existing["id"])
         existing = self.connection.execute(
             "SELECT id, tags FROM memories WHERE content = ?", (content,)
@@ -480,7 +594,7 @@ class Database:
                 """,
                 (tags or str(existing["tags"]), memory_key, now, int(existing["id"])),
             )
-            self.connection.commit()
+            self._commit()
             return int(existing["id"])
         cursor = self.connection.execute(
             """
@@ -489,56 +603,79 @@ class Database:
             """,
             (content, tags, memory_key, now, now),
         )
-        self.connection.commit()
+        self._commit()
         return int(cursor.lastrowid)
 
     def list_memories(self, limit: int = 20) -> list[dict[str, Any]]:
-        rows = self.connection.execute(
+        return self._cached_rows(
+            ("memories", int(limit)),
             """
             SELECT id, content, tags, memory_key, created_at
             FROM memories ORDER BY updated_at DESC LIMIT ?
             """,
             (limit,),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        )
 
     def profile_memories(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return stable keyed facts that should be available in every turn."""
-        rows = self.connection.execute(
+        return self._cached_rows(
+            ("profile_memories", int(limit)),
             """
             SELECT id, content, tags, memory_key
             FROM memories WHERE memory_key <> ''
             ORDER BY updated_at DESC LIMIT ?
             """,
             (limit,),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        )
 
     def search_memories(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         compact = "".join(query.split())
-        candidates: list[str] = []
-        for token in query.replace("，", " ").replace("。", " ").split():
-            if len(token) >= 2:
-                candidates.append(token)
-        if len(compact) >= 4:
-            candidates.extend(compact[index : index + 2] for index in range(len(compact) - 1))
-        candidates = list(dict.fromkeys(candidates))[:12]
-        if not candidates:
+        if len(compact) < 2:
             return []
+        if self._fts_available and len(compact) >= 3:
+            terms = [compact[index : index + 3] for index in range(len(compact) - 2)]
+            terms.extend(
+                token
+                for token in query.replace("，", " ").replace("。", " ").split()
+                if len(token) >= 3
+            )
+            expression = " OR ".join(
+                f'"{term.replace(chr(34), chr(34) * 2)}"'
+                for term in list(dict.fromkeys(terms))[:16]
+            )
+            return self._cached_rows(
+                ("memory_search_fts", expression, int(limit)),
+                """
+                SELECT memories.id, memories.content, memories.tags, memories.memory_key
+                FROM memories_fts
+                JOIN memories ON memories.id = memories_fts.rowid
+                WHERE memories_fts MATCH ?
+                ORDER BY bm25(memories_fts), memories.updated_at DESC
+                LIMIT ?
+                """,
+                (expression, int(limit)),
+            )
+
+        candidates = [
+            token
+            for token in query.replace("，", " ").replace("。", " ").split()
+            if len(token) >= 2
+        ]
+        candidates = list(dict.fromkeys([*candidates, compact]))[:8]
         clauses = " OR ".join("content LIKE ? OR tags LIKE ?" for _ in candidates)
         values: list[Any] = []
         for candidate in candidates:
             pattern = f"%{candidate}%"
             values.extend([pattern, pattern])
         values.append(limit)
-        rows = self.connection.execute(
+        return self._cached_rows(
+            ("memory_search_like", tuple(candidates), int(limit)),
             f"""
             SELECT id, content, tags, memory_key FROM memories
             WHERE {clauses} ORDER BY updated_at DESC LIMIT ?
             """,
-            values,
-        ).fetchall()
-        return [dict(row) for row in rows]
+            tuple(values),
+        )
 
     def log_usage(
         self,
@@ -570,7 +707,7 @@ class Database:
                 utc_now(),
             ),
         )
-        self.connection.commit()
+        self._commit()
 
     def usage_total(
         self,
@@ -578,30 +715,63 @@ class Database:
         task_id: str | None = None,
         currency: str | None = None,
     ) -> float:
+        now = datetime.now(timezone.utc)
         if period == "day":
-            time_clause = "date(created_at) = date('now')"
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         elif period == "month":
-            time_clause = "strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')"
+            start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         else:
             raise ValueError(f"Unsupported period: {period}")
-        params: list[Any] = []
+        clauses = ["created_at >= ?"]
+        params: list[Any] = [start.isoformat()]
         if task_id is not None:
-            time_clause += " AND task_id = ?"
+            clauses.append("task_id = ?")
             params.append(task_id)
         if currency is not None:
-            time_clause += " AND currency = ?"
+            clauses.append("currency = ?")
             params.append(currency)
         row = self.connection.execute(
-            f"SELECT COALESCE(SUM(estimated_cost), 0) AS total FROM api_usage WHERE {time_clause}",
+            "SELECT COALESCE(SUM(estimated_cost), 0) AS total "
+            f"FROM api_usage WHERE {' AND '.join(clauses)}",
             params,
         ).fetchone()
         return float(row["total"])
 
+    def usage_snapshot(
+        self,
+        currency: str,
+        task_id: str | None = None,
+    ) -> dict[str, float]:
+        """Read daily, monthly and optional per-task usage in one indexed query."""
+        now = datetime.now(timezone.utc)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        month_start = now.replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        ).isoformat()
+        row = self.connection.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN created_at >= ? THEN estimated_cost ELSE 0 END), 0)
+                    AS today,
+                COALESCE(SUM(estimated_cost), 0) AS month,
+                COALESCE(SUM(CASE
+                    WHEN created_at >= ? AND task_id = ? THEN estimated_cost ELSE 0 END), 0)
+                    AS task
+            FROM api_usage
+            WHERE currency = ? AND created_at >= ?
+            """,
+            (day_start, day_start, task_id or "", currency, month_start),
+        ).fetchone()
+        return {key: float(row[key]) for key in ("today", "month", "task")}
+
     def usage_summary(self, currency: str | None = None) -> dict[str, float]:
-        return {
-            "today": self.usage_total("day", currency=currency),
-            "month": self.usage_total("month", currency=currency),
-        }
+        if currency is None:
+            return {
+                "today": self.usage_total("day"),
+                "month": self.usage_total("month"),
+            }
+        snapshot = self.usage_snapshot(currency)
+        return {key: snapshot[key] for key in ("today", "month")}
 
     def log_action(
         self,
@@ -629,7 +799,7 @@ class Database:
                 utc_now(),
             ),
         )
-        self.connection.commit()
+        self._commit()
 
     def close(self) -> None:
         self.connection.close()

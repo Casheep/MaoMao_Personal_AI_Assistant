@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -52,9 +54,9 @@ class QtQuickMigrationTests(unittest.TestCase):
             bridge.close()
 
     def test_v002_is_the_single_runtime_version(self) -> None:
-        self.assertEqual(__version__, "v0.0.2_beta1")
+        self.assertEqual(__version__, "v0.0.2_beta2")
         project = Path("pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.0.2b1"', project)
+        self.assertIn('version = "0.0.2b2"', project)
 
     def test_launcher_uses_qt_quick_entrypoint(self) -> None:
         source = Path("launcher/MaoMaoLauncher.cs").read_text(encoding="utf-8")
@@ -64,6 +66,54 @@ class QtQuickMigrationTests(unittest.TestCase):
         source = Path("assistant_app/cli.py").read_text(encoding="utf-8")
         self.assertNotIn("--legacy-gui", source)
         self.assertNotIn("from .rounded_gui import main", source)
+
+    def test_qt_startup_defers_conversation_and_audio_device_dependencies(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; import assistant_app.qt_quick.app; "
+                    "names=('assistant_app.agent','httpx','sounddevice'); "
+                    "print(','.join(name for name in names if name in sys.modules))"
+                ),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.stdout.strip(), "")
+
+    def test_compact_combo_and_form_controls_use_rounded_backgrounds(self) -> None:
+        qml = Path("assistant_app/qt_quick/qml/Main.qml").read_text(encoding="utf-8")
+        combo = qml[qml.index("component CompactCombo"):qml.index("component SettingTitle")]
+        self.assertIn("popup: Popup", combo)
+        self.assertIn("delegate: ItemDelegate", combo)
+        self.assertIn("radius: 14", combo)
+        self.assertIn("component RoundCheckBox", combo)
+        self.assertIn("component RoundedProgressBar", combo)
+        self.assertIn("background: Rectangle { color: window.cardColor; radius: 24 }", qml)
+
+    def test_developer_attribution_is_consistent(self) -> None:
+        qml = Path("assistant_app/qt_quick/qml/Main.qml").read_text(encoding="utf-8")
+        project = Path("pyproject.toml").read_text(encoding="utf-8")
+        for source in (qml, project):
+            self.assertIn("casheep", source)
+            self.assertNotIn("MaoMao contributors", source)
+
+    def test_retired_gui_modules_are_not_shipped(self) -> None:
+        self.assertFalse(Path("assistant_app/gui.py").exists())
+        self.assertFalse(Path("assistant_app/rounded_gui.py").exists())
+
+    def test_current_bridge_owns_wake_parsing_and_conversation_exit_rules(self) -> None:
+        self.assertEqual(
+            AssistantBridge._parse_wake_words(" 猫猫，喵喵助手；猫 猫\n小七 "),
+            ["猫猫", "喵喵助手", "小七"],
+        )
+        from assistant_app.qt_quick.bridge import EXIT_PATTERN
+
+        self.assertIsNotNone(EXIT_PATTERN.fullmatch("拜拜啦"))
+        self.assertIsNone(EXIT_PATTERN.fullmatch("继续帮我看看天气"))
 
     def test_schedule_ui_preserves_normal_and_silent_modes(self) -> None:
         bridge = AssistantBridge()
