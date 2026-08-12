@@ -10,5 +10,5 @@ All notable changes to MaoMao Personal AI Assistant are recorded here.
 - Added responsive compact layouts and threaded OpenGL rendering for smooth Windows resizing without Direct3D swap-chain gaps.
 - Deferred model, audio-device, NumPy, wake-template and optional dependency loading to shorten startup work.
 - Optimized wake-voice MFCC/DTW processing, real-time audio buffering, versioned SQLite migrations, FTS5 memory retrieval, caching and batched writes.
-- Added safe action confirmation, startup component installation, content-free timing diagnostics and public-package privacy checks.
+- Added safe action confirmation, startup component installation and content-free timing diagnostics.
 - Removed inactive legacy GUI code and dependencies and made Qt Quick the sole graphical entrypoint.
