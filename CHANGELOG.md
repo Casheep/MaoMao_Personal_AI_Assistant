@@ -2,6 +2,21 @@
 
 All notable changes to MaoMao Personal AI Assistant are recorded here.
 
+## [v0.0.2_beta3] - 2026-08-12
+
+- Initialized the next beta development version from `v0.0.2_beta2`.
+- Folded the broad base-ability category into the computer-and-browser category.
+- Added persistent custom skill categories with validation, reordering, confirmed deletion and per-skill assignment.
+- Added independent search with clear controls and result counts to the skill library, favorites panel and skill-assignment list.
+- Centered the skill-category grid with two stable equal-width columns.
+- Collapsed both sidebars by default in compact layouts and allowed one drawer at a time for narrow or high-DPI windows.
+- Kept preload and pause-all controls inside the audio card by switching to a compact control row when space is constrained.
+- Kept sidebars closed after resizing back from a compact window instead of reopening saved panels automatically.
+- Switched Windows Qt Quick rendering from Direct3D 11 to threaded OpenGL to avoid black uncommitted swap-chain areas during fast live resizing.
+- Deferred NumPy, saved wake-voice templates and installer-only standard-library modules until their first background use, shortening the measured Qt startup import path without changing audio data handling.
+- Deferred construction of the skill-category manager until it is first opened.
+- Split category state, category management and reusable search controls into focused modules.
+
 ## [v0.0.2_beta2] - 2026-08-12
 
 - Initialized the next beta development version from `v0.0.2_beta1`.

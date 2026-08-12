@@ -6,10 +6,10 @@ import QtQuick.Window
 
 ApplicationWindow {
     id: window
-    width: Math.max(minimumWidth, Math.min(1540, Screen.width - 80))
-    height: Math.max(minimumHeight, Math.min(800, Screen.height - 80))
-    minimumWidth: 1180
-    minimumHeight: 640
+    width: Math.max(minimumWidth, Math.min(1540, Screen.width - 40))
+    height: Math.max(minimumHeight, Math.min(800, Screen.height - 40))
+    minimumWidth: Math.min(960, Screen.width)
+    minimumHeight: Math.min(560, Screen.height)
     visible: true
     title: "MaoMao"
     color: "#F5F5F7"
@@ -17,6 +17,10 @@ ApplicationWindow {
     property bool forceClose: false
     property bool skillOpen: assistant.skillSidebarExpanded
     property bool favoriteOpen: assistant.favoriteSidebarExpanded
+    property bool compactLayout: width < 1080
+    property bool previousCompactLayout: compactLayout
+    property bool skillPanelOpen: skillOpen
+    property bool favoritePanelOpen: favoriteOpen
     property string skillMode: "learned"
     property string skillCategory: "全部"
     property color pageBackground: "#F5F5F7"
@@ -26,11 +30,33 @@ ApplicationWindow {
     property color borderColor: "#E3E3E8"
     property color accent: "#1687FF"
 
+    Component.onCompleted: {
+        if (compactLayout) {
+            skillOpen = false
+            favoriteOpen = false
+        }
+        previousCompactLayout = compactLayout
+    }
+
+    onCompactLayoutChanged: {
+        if (compactLayout && !previousCompactLayout) {
+            skillOpen = false
+            favoriteOpen = false
+        }
+        previousCompactLayout = compactLayout
+    }
+
     onClosing: close => {
         if (!forceClose) {
             close.accepted = false
             window.hide()
         }
+    }
+
+    function openCategoryManager() {
+        categoryManagerLoader.active = true
+        if (categoryManagerLoader.item)
+            categoryManagerLoader.item.open()
     }
 
     component Card: Rectangle {
@@ -252,6 +278,28 @@ ApplicationWindow {
         }
     }
 
+    component PreloadButton: Button {
+        id: control
+        property bool labeled: false
+        implicitWidth: labeled ? 104 : 72
+        implicitHeight: 42
+        text: (labeled ? "预加载 " : "") + (assistant.preloadLoading ? "加载中" : (assistant.preloadEnabled ? "开" : "关"))
+        enabled: !assistant.preloadLoading
+        font.pixelSize: 12
+        contentItem: Text {
+            text: control.text
+            color: assistant.preloadLoading ? "#A35A00" : (assistant.preloadEnabled ? window.accent : window.secondaryText)
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            font: control.font
+        }
+        background: Rectangle {
+            radius: height / 2
+            color: assistant.preloadLoading ? "#FFF2D8" : (assistant.preloadEnabled ? (control.hovered ? "#D8E9FF" : "#E8F2FF") : (control.hovered ? "#E2E2E7" : "#F0F0F3"))
+        }
+        onClicked: assistant.setPreloadEnabled(!assistant.preloadEnabled)
+    }
+
     component SettingTitle: Label {
         font.pixelSize: 20
         font.bold: true
@@ -262,6 +310,12 @@ ApplicationWindow {
         for (let i = 0; i < items.length; ++i)
             if (items[i].value === value) return i
         return 0
+    }
+
+    function matchesSkillSearch(item, query) {
+        const needle = query.trim().toLowerCase()
+        if (needle === "") return true
+        return (item.name + " " + item.description + " " + item.category).toLowerCase().indexOf(needle) >= 0
     }
 
     function managerTitle() {
@@ -301,6 +355,10 @@ ApplicationWindow {
         function onAsrFallbackRequested(error) {
             asrFallbackPopup.errorText = error
             asrFallbackPopup.open()
+        }
+        function onSkillsChanged() {
+            if (window.skillCategory !== "全部" && assistant.skillCategories.indexOf(window.skillCategory) < 0)
+                window.skillCategory = "全部"
         }
         function onShowWindowRequested() { window.show(); window.raise(); window.requestActivate() }
     }
@@ -356,6 +414,27 @@ ApplicationWindow {
                 BlueButton { text: "仅本次使用"; onClicked: { asrFallbackPopup.close(); assistant.resolveAsrFallback(true) } }
             }
         }
+    }
+
+    Component {
+        id: categoryManagerComponent
+        SkillCategoryManager {
+            objectName: "categoryManager"
+            assistantBackend: assistant
+            pageBackground: window.pageBackground
+            cardColor: window.cardColor
+            textColor: window.textColor
+            secondaryText: window.secondaryText
+            borderColor: window.borderColor
+            accent: window.accent
+        }
+    }
+
+    Loader {
+        id: categoryManagerLoader
+        active: false
+        sourceComponent: categoryManagerComponent
+        onLoaded: item.open()
     }
 
     Popup {
@@ -642,7 +721,8 @@ ApplicationWindow {
 
         Item {
             id: skillSlot
-            Layout.preferredWidth: window.skillOpen ? 274 : 28
+            objectName: "skillSlot"
+            Layout.preferredWidth: window.skillPanelOpen ? 274 : 28
             Layout.fillHeight: true
             clip: true
             Behavior on Layout.preferredWidth { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
@@ -651,10 +731,10 @@ ApplicationWindow {
                 id: skillPanel
                 width: 238
                 height: parent.height
-                visible: skillSlot.width > 80
+                visible: window.skillPanelOpen && skillSlot.width > 80
                 ColumnLayout {
                     anchors.fill: parent; anchors.margins: 12; spacing: 8
-                    RowLayout { Layout.fillWidth: true; Layout.leftMargin: 6; Layout.rightMargin: 5; Label { text: "技能"; font.pixelSize: 20; font.bold: true; color: window.textColor } Item { Layout.fillWidth: true } Label { text: assistant.skills.filter(item => item.enabled).length + "/" + assistant.skills.length; color: window.secondaryText; font.pixelSize: 10 } }
+                    RowLayout { Layout.fillWidth: true; Layout.leftMargin: 6; Layout.rightMargin: 5; Label { text: "技能"; font.pixelSize: 20; font.bold: true; color: window.textColor } Item { Layout.fillWidth: true } SoftButton { text: "分类"; onClicked: window.openCategoryManager() } Label { text: assistant.skills.filter(item => item.enabled).length + "/" + assistant.skills.length; color: window.secondaryText; font.pixelSize: 10 } }
                     Rectangle {
                         Layout.fillWidth: true; implicitHeight: 38; radius: 19; color: "#F0F0F3"
                         RowLayout { anchors.fill: parent; anchors.margins: 2; spacing: 2
@@ -662,17 +742,26 @@ ApplicationWindow {
                             Button { Layout.fillWidth: true; implicitHeight: 34; text: "技能库"; font.pixelSize: 11; font.bold: true; contentItem: Text { text: parent.text; color: window.skillMode === "library" ? "white" : "#3A3A3C"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font: parent.font } background: Rectangle { radius: 17; color: window.skillMode === "library" ? window.accent : "transparent" } onClicked: window.skillMode = "library" }
                         }
                     }
-                    GridLayout {
-                        Layout.fillWidth: true; columns: 2; columnSpacing: 2; rowSpacing: 2
-                        Repeater {
-                            model: ["全部", "语音与对话", "电脑与浏览器", "屏幕与视觉", "记忆与文件", "设备与自动化", "基础能力"]
-                            delegate: Button { required property string modelData; Layout.fillWidth: true; implicitHeight: 27; text: modelData; font.pixelSize: 9; contentItem: Text { text: parent.text; color: window.skillCategory === parent.text ? window.accent : window.secondaryText; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font: parent.font } background: Rectangle { radius: 14; color: window.skillCategory === parent.text ? "#E8F2FF" : "#FFFFFF" } onClicked: window.skillCategory = text }
+                    RoundedSearchField { id: skillSearch; Layout.fillWidth: true; placeholderText: "搜索技能" }
+                    Label { Layout.fillWidth: true; visible: skillSearch.text.trim() !== ""; text: skillList.count + " 个匹配结果"; color: window.secondaryText; font.pixelSize: 9; horizontalAlignment: Text.AlignRight }
+                    ScrollView {
+                        id: skillCategoryScroll
+                        Layout.fillWidth: true; Layout.preferredHeight: 86; clip: true
+                        contentWidth: availableWidth
+                        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                        GridLayout {
+                            width: skillCategoryScroll.availableWidth
+                            columns: 2; columnSpacing: 2; rowSpacing: 2
+                            Repeater {
+                                model: ["全部"].concat(assistant.skillCategories)
+                                delegate: Button { required property string modelData; Layout.fillWidth: true; Layout.preferredWidth: (skillCategoryScroll.availableWidth - 2) / 2; implicitHeight: 27; text: modelData; font.pixelSize: 9; contentItem: Text { text: parent.text; color: window.skillCategory === parent.text ? window.accent : window.secondaryText; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font: parent.font; elide: Text.ElideRight } background: Rectangle { radius: 14; color: window.skillCategory === parent.text ? "#E8F2FF" : "#FFFFFF" } onClicked: window.skillCategory = text }
+                            }
                         }
                     }
                     ListView {
                         id: skillList
                         Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8
-                        model: assistant.skills.filter(item => item.enabled === (window.skillMode === "learned") && (window.skillCategory === "全部" || item.category === window.skillCategory))
+                        model: assistant.skills.filter(item => item.enabled === (window.skillMode === "learned") && (window.skillCategory === "全部" || item.category === window.skillCategory) && window.matchesSkillSearch(item, skillSearch.text))
                         delegate: Rectangle {
                             required property var modelData
                                 width: skillList.width; height: modelData.hasSettings ? 112 : 84; radius: 18; color: "#F7F7F9"; border.color: window.borderColor
@@ -683,18 +772,29 @@ ApplicationWindow {
                                 SoftButton { visible: modelData.hasSettings; text: "设置"; Layout.alignment: Qt.AlignLeft; onClicked: window.openSkillSettings(modelData.id) }
                             }
                         }
-                        Label { anchors.centerIn: parent; visible: skillList.count === 0; text: window.skillMode === "learned" ? "这个分类还没有已学习技能" : "这个分类没有可学习技能"; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter; color: "#8E8E93"; width: parent.width - 20 }
+                        Label { anchors.centerIn: parent; visible: skillList.count === 0; text: skillSearch.text.trim() !== "" ? "没有匹配的技能" : (window.skillMode === "learned" ? "这个分类还没有已学习技能" : "这个分类没有可学习技能"); wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter; color: "#8E8E93"; width: parent.width - 20 }
                     }
                 }
             }
             Button {
-                width: window.skillOpen ? 32 : 28; height: 118
+                objectName: "skillSidebarToggle"
+                width: window.skillPanelOpen ? 32 : 28; height: 118
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                text: window.skillOpen ? "❮" : "技\n能\n栏"
-                font.pixelSize: window.skillOpen ? 24 : 12; font.bold: true
+                text: window.skillPanelOpen ? "❮" : "技\n能\n栏"
+                font.pixelSize: window.skillPanelOpen ? 24 : 12; font.bold: true
                 contentItem: Text { text: parent.text; color: window.accent; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font: parent.font }
                 background: Rectangle { radius: 14; color: parent.hovered ? "#D8E9FF" : "#E8F2FF" }
-                onClicked: { window.skillOpen = !window.skillOpen; assistant.setSkillSidebarExpanded(window.skillOpen) }
+                onClicked: {
+                    if (window.compactLayout) {
+                        const opening = !window.skillOpen
+                        window.skillOpen = opening
+                        if (opening) window.favoriteOpen = false
+                        assistant.setSkillSidebarExpanded(window.skillOpen)
+                    } else {
+                        window.skillOpen = !window.skillOpen
+                        assistant.setSkillSidebarExpanded(window.skillOpen)
+                    }
+                }
             }
         }
 
@@ -744,6 +844,9 @@ ApplicationWindow {
                     }
                 }
                 Card {
+                    id: audioControlCard
+                    objectName: "audioControlCard"
+                    property bool compactAudioControls: width < 650
                     Layout.fillWidth: true; implicitHeight: 150; radius: 42; Layout.topMargin: 14; Layout.bottomMargin: 10
                             ColumnLayout {
                                 anchors.fill: parent; anchors.margins: 18; spacing: 4
@@ -753,18 +856,10 @@ ApplicationWindow {
                             ColumnLayout { spacing: 4; Label { text: "音色"; color: window.secondaryText; font.pixelSize: 12 } CompactCombo { implicitWidth: 104; implicitHeight: 42; model: assistant.voiceOptions; Component.onCompleted: currentIndex = Math.max(0, assistant.voiceOptions.indexOf(assistant.voice)); onActivated: assistant.setVoice(currentText) } }
                             ColumnLayout { spacing: 4; Label { text: "语音生成"; color: window.secondaryText; font.pixelSize: 12 } CompactCombo { implicitWidth: 258; implicitHeight: 42; textRole: "label"; valueRole: "value"; model: assistant.ttsEngineOptions; Component.onCompleted: currentIndex = window.comboIndex(assistant.ttsEngineOptions, assistant.ttsEngine); onActivated: assistant.setTtsEngine(currentValue) } }
                             ColumnLayout {
+                                visible: !audioControlCard.compactAudioControls
                                 spacing: 4
                                 Label { text: "预加载"; color: window.secondaryText; font.pixelSize: 12 }
-                                Button {
-                                    implicitWidth: 72
-                                    implicitHeight: 42
-                                    text: assistant.preloadLoading ? "加载中" : (assistant.preloadEnabled ? "开" : "关")
-                                    enabled: !assistant.preloadLoading
-                                    font.pixelSize: 12
-                                    contentItem: Text { text: parent.text; color: assistant.preloadLoading ? "#A35A00" : (assistant.preloadEnabled ? window.accent : window.secondaryText); horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font: parent.font }
-                                    background: Rectangle { radius: height / 2; color: assistant.preloadLoading ? "#FFF2D8" : (assistant.preloadEnabled ? (parent.hovered ? "#D8E9FF" : "#E8F2FF") : (parent.hovered ? "#E2E2E7" : "#F0F0F3")) }
-                                    onClicked: assistant.setPreloadEnabled(!assistant.preloadEnabled)
-                                }
+                                PreloadButton { }
                             }
                             Item { Layout.fillWidth: true }
                         }
@@ -775,7 +870,8 @@ ApplicationWindow {
                             SoftButton { implicitWidth: 62; text: "继续"; onClicked: assistant.ttsControl("resume") }
                             SoftButton { implicitWidth: 62; text: "停止"; onClicked: assistant.ttsControl("stop") }
                             Item { Layout.fillWidth: true }
-                            DangerButton { implicitWidth: 82; text: "暂停全部"; onClicked: assistant.pauseAll() }
+                            PreloadButton { objectName: "compactPreloadButton"; visible: audioControlCard.compactAudioControls; labeled: true }
+                            DangerButton { objectName: "pauseAllButton"; implicitWidth: 82; text: "暂停全部"; onClicked: assistant.pauseAll() }
                         }
                         RowLayout { Layout.fillWidth: true; Label { text: "●"; color: assistant.busy ? "#FF9F0A" : "#34C759" } Label { text: assistant.status; color: window.secondaryText; font.pixelSize: 12 } Item { Layout.fillWidth: true } }
                     }
@@ -798,35 +894,51 @@ ApplicationWindow {
 
         Item {
             id: favoriteSlot
-            Layout.preferredWidth: window.favoriteOpen ? 240 : 28
+            objectName: "favoriteSlot"
+            Layout.preferredWidth: window.favoritePanelOpen ? 240 : 28
             Layout.fillHeight: true
             clip: true
             Behavior on Layout.preferredWidth { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
             Button {
-                width: window.favoriteOpen ? 32 : 28; height: 118
+                width: window.favoritePanelOpen ? 32 : 28; height: 118
                 anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                text: window.favoriteOpen ? "❯" : "收\n藏\n夹"
-                font.pixelSize: window.favoriteOpen ? 24 : 12; font.bold: true
+                text: window.favoritePanelOpen ? "❯" : "收\n藏\n夹"
+                font.pixelSize: window.favoritePanelOpen ? 24 : 12; font.bold: true
                 contentItem: Text { text: parent.text; color: "#A66300"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font: parent.font }
                 background: Rectangle { radius: 14; color: parent.hovered ? "#FFE9B5" : "#FFF3D9" }
-                onClicked: { window.favoriteOpen = !window.favoriteOpen; assistant.setFavoriteSidebarExpanded(window.favoriteOpen) }
+                onClicked: {
+                    if (window.compactLayout) {
+                        const opening = !window.favoriteOpen
+                        window.favoriteOpen = opening
+                        if (opening) window.skillOpen = false
+                        assistant.setFavoriteSidebarExpanded(window.favoriteOpen)
+                    } else if (window.favoritePanelOpen) {
+                        window.favoriteOpen = false
+                        assistant.setFavoriteSidebarExpanded(false)
+                    } else {
+                        window.favoriteOpen = true
+                        assistant.setFavoriteSidebarExpanded(true)
+                    }
+                }
             }
             Card {
                 x: 32; width: 208; height: parent.height
-                visible: favoriteSlot.width > 80
+                visible: window.favoritePanelOpen && favoriteSlot.width > 80
                 ColumnLayout {
                     anchors.fill: parent; anchors.margins: 12; spacing: 8
                     RowLayout { Layout.fillWidth: true; Layout.leftMargin: 4; Label { text: "收藏夹"; font.pixelSize: 20; font.bold: true; color: window.textColor } Item { Layout.fillWidth: true } Label { text: assistant.skills.filter(item => item.favorite).length; color: window.secondaryText; font.pixelSize: 10 } }
+                    RoundedSearchField { id: favoriteSearch; Layout.fillWidth: true; placeholderText: "搜索收藏"; fillColor: "#FFF3D9" }
+                    Label { Layout.fillWidth: true; visible: favoriteSearch.text.trim() !== ""; text: favoriteList.count + " 个匹配结果"; color: window.secondaryText; font.pixelSize: 9; horizontalAlignment: Text.AlignRight }
                     ListView {
                         id: favoriteList
                         Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8
-                        model: assistant.skills.filter(item => item.favorite)
+                        model: assistant.skills.filter(item => item.favorite && window.matchesSkillSearch(item, favoriteSearch.text))
                         delegate: Rectangle {
                             required property var modelData
                             width: favoriteList.width; height: 88; radius: 17; color: "#F7F7F9"; border.color: window.borderColor
                             ColumnLayout { anchors.fill: parent; anchors.margins: 10; spacing: 3; RowLayout { Layout.fillWidth: true; Label { Layout.fillWidth: true; text: modelData.name; font.pixelSize: 11; font.bold: true; color: window.textColor } BlueSwitch { checked: modelData.enabled; onToggled: assistant.setSkillEnabled(modelData.id, checked) } } RowLayout { Layout.fillWidth: true; SoftButton { visible: modelData.hasSettings; text: "设置"; onClicked: window.openSkillSettings(modelData.id) } Item { Layout.fillWidth: true } Button { implicitWidth: 28; implicitHeight: 26; text: "★"; contentItem: Text { text: parent.text; color: "#F5A623"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter } background: Rectangle { radius: 13; color: "#FFF3D9" } onClicked: assistant.setSkillFavorite(modelData.id, false) } } }
                         }
-                        Label { anchors.centerIn: parent; visible: favoriteList.count === 0; width: parent.width - 20; text: "在技能栏点击 ☆\n即可收藏常用技能"; horizontalAlignment: Text.AlignHCenter; color: "#8E8E93"; font.pixelSize: 10 }
+                        Label { anchors.centerIn: parent; visible: favoriteList.count === 0; width: parent.width - 20; text: favoriteSearch.text.trim() !== "" ? "没有匹配的收藏" : "在技能栏点击 ☆\n即可收藏常用技能"; horizontalAlignment: Text.AlignHCenter; color: "#8E8E93"; font.pixelSize: 10 }
                     }
                 }
             }

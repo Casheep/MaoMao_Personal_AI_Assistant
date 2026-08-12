@@ -353,7 +353,8 @@ class TTSConfigurationTests(unittest.TestCase):
     def test_local_version_archive_uses_only_committed_git_content(self) -> None:
         archive_script = Path("scripts/archive-local-version.ps1").read_text(encoding="utf-8")
         self.assertIn("git -C $projectRoot archive", archive_script)
-        self.assertIn("bundle create $temporaryBundle beta", archive_script)
+        self.assertIn("bundle create $temporaryBundle $bundleBranch", archive_script)
+        self.assertIn("(?:_|$)", archive_script)
         self.assertNotIn("bundle create $temporaryBundle --all", archive_script)
         self.assertIn('git -C $projectRoot show "${commitHash}:assistant_app/version.py"', archive_script)
         self.assertNotIn("config.local.json", archive_script)
@@ -2239,6 +2240,7 @@ class StorageAndBudgetTests(unittest.TestCase):
             )
             with patch.object(WakeVoiceVerifier, "_calibrated_threshold") as calibrate:
                 verifier = WakeVoiceVerifier(path)
+                verifier.load()
         calibrate.assert_not_called()
         self.assertAlmostEqual(verifier.threshold, 0.46, places=6)
 

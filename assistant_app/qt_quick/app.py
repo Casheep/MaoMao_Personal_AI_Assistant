@@ -169,6 +169,8 @@ def main() -> int:
     enable_dpi_awareness()
     configure_windows_app_identity()
     os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
+    if sys.platform == "win32":
+        os.environ.setdefault("QSG_RHI_BACKEND", "opengl")
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("MaoMao")
     app.setOrganizationName("MaoMao")

@@ -15,9 +15,21 @@ from collections import deque
 from functools import lru_cache
 from heapq import nsmallest
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
+else:
+    class _LazyNumpy:
+        """Load NumPy only when an audio operation actually needs it."""
+
+        def __getattr__(self, name: str) -> Any:
+            import numpy as numpy_module
+
+            globals()["np"] = numpy_module
+            return getattr(numpy_module, name)
+
+    np = _LazyNumpy()
 
 from .secrets import load_mimo_key, redact_secret
 
@@ -572,6 +584,7 @@ class WakeWordListener:
             grammar = json.dumps([*self._grammar_phrases(), "[unk]"], ensure_ascii=False)
             recognizer = KaldiRecognizer(model, self.sample_rate, grammar)
             recognizer.SetWords(True)
+            self.verifier.load()
             if not self.capture_enabled:
                 self._notify("唤醒监听已关闭")
             elif self.require_voice_match and not self.verifier.enrolled:
@@ -681,10 +694,12 @@ class WakeVoiceVerifier:
         self._lock = threading.Lock()
         self.templates: list[np.ndarray] = []
         self.threshold = 0.38
-        self._load()
+        self._loaded = False
 
     @property
     def enrolled(self) -> bool:
+        if not self._loaded:
+            return self.path.is_file()
         with self._lock:
             return len(self.templates) >= 3
 
@@ -693,24 +708,30 @@ class WakeVoiceVerifier:
         with self._lock:
             self.templates = []
             self.threshold = 0.38
+            self._loaded = True
         self.path.unlink(missing_ok=True)
 
-    def _load(self) -> None:
-        if not self.path.is_file():
-            return
-        try:
-            with np.load(self.path, allow_pickle=False) as values:
-                templates = [
-                    values[key].astype(np.float32)
-                    for key in sorted(values.files)
-                    if key.startswith("template_")
-                ]
-                threshold = float(values["threshold"][0])
-            if len(templates) >= 3:
-                self.templates = templates
-                self.threshold = min(0.68, max(0.35, threshold))
-        except Exception:
-            self.templates = []
+    def load(self) -> None:
+        """Load saved voice templates on first background use."""
+        with self._lock:
+            if self._loaded:
+                return
+            self._loaded = True
+            if not self.path.is_file():
+                return
+            try:
+                with np.load(self.path, allow_pickle=False) as values:
+                    templates = [
+                        values[key].astype(np.float32)
+                        for key in sorted(values.files)
+                        if key.startswith("template_")
+                    ]
+                    threshold = float(values["threshold"][0])
+                if len(templates) >= 3:
+                    self.templates = templates
+                    self.threshold = min(0.68, max(0.35, threshold))
+            except Exception:
+                self.templates = []
 
     @staticmethod
     def _features(samples: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -814,9 +835,11 @@ class WakeVoiceVerifier:
         with self._lock:
             self.templates = templates
             self.threshold = threshold
+            self._loaded = True
         return threshold
 
     def score(self, audio_bytes: bytes, sample_rate: int) -> float:
+        self.load()
         with self._lock:
             templates = list(self.templates)
         if len(templates) < 3:

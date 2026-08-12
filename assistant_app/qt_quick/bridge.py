@@ -26,6 +26,7 @@ from ..config import app_paths, load_config, save_local_settings
 from ..database import Database
 from ..runtime import build_agent
 from ..secrets import key_configuration_status, save_api_keys
+from ..skill_categories import SkillCategoryState
 from ..skills import SKILL_CATALOG, is_skill_enabled
 from ..tts import ENGINE_BACKENDS, ENGINE_LABELS, MIMO_VOICES, VOICE_PRESETS, SpeechSynthesizer
 
@@ -47,6 +48,7 @@ EXIT_PATTERN = re.compile(r"^(拜拜|再见|不聊了|先这样|结束对话|退
 class AssistantBridge(QObject):
     messagesChanged = Signal()
     skillsChanged = Signal()
+    skillCategoryStatusChanged = Signal()
     schedulesChanged = Signal()
     permissionsChanged = Signal()
     busyChanged = Signal()
@@ -93,6 +95,7 @@ class AssistantBridge(QObject):
         self._preload_loading = False
         self._closing = False
         self._status = "正在初始化…"
+        self._skill_category_status = ""
         self._usage = "今日 ￥0.00 · 本月 ￥0.00"
         self._last_input_mode = "text"
         self._continuous_session = False
@@ -159,8 +162,12 @@ class AssistantBridge(QObject):
         self._schedule_timer.setInterval(1500)
         self._schedule_timer.timeout.connect(self._poll_schedules)
         self._schedule_timer.start()
+        self._startup_timer = QTimer(self)
+        self._startup_timer.setSingleShot(True)
+        self._startup_timer.setInterval(200)
+        self._startup_timer.timeout.connect(self.startServices)
+        self._startup_timer.start()
         self.refreshUsage()
-        QTimer.singleShot(200, self.startServices)
 
     @Property("QVariantList", notify=messagesChanged)
     def messages(self) -> list[dict[str, str]]:
@@ -169,12 +176,13 @@ class AssistantBridge(QObject):
     @Property("QVariantList", notify=skillsChanged)
     def skills(self) -> list[dict[str, Any]]:
         favorites = set(self.config.get("ui", {}).get("favorite_skills", []))
+        category_state = self._skill_category_state()
         return [
             {
                 "id": skill.id,
                 "name": skill.name,
                 "description": skill.description,
-                "category": skill.category,
+                "category": category_state.category_for(skill.id, skill.category),
                 "enabled": is_skill_enabled(self.config, skill.id),
                 "favorite": skill.id in favorites,
                 "hasSettings": skill.id
@@ -182,6 +190,21 @@ class AssistantBridge(QObject):
             }
             for skill in SKILL_CATALOG
         ]
+
+    def _skill_category_state(self) -> SkillCategoryState:
+        return SkillCategoryState.from_ui_config(self.config.get("ui", {}))
+
+    @Property("QVariantList", notify=skillsChanged)
+    def skillCategories(self) -> list[str]:
+        return self._skill_category_state().categories
+
+    @Property("QVariantList", notify=skillsChanged)
+    def customSkillCategories(self) -> list[str]:
+        return list(self._skill_category_state().custom_categories)
+
+    @Property(str, notify=skillCategoryStatusChanged)
+    def skillCategoryStatus(self) -> str:
+        return self._skill_category_status
 
     @Property("QVariantList", notify=schedulesChanged)
     def schedules(self) -> list[dict[str, Any]]:
@@ -1007,6 +1030,63 @@ class AssistantBridge(QObject):
         save_local_settings({"ui": {"favorite_skills": favorites}})
         self.skillsChanged.emit()
 
+    def _set_skill_category_status(self, message: str) -> None:
+        if self._skill_category_status == message:
+            return
+        self._skill_category_status = message
+        self.skillCategoryStatusChanged.emit()
+
+    def _save_skill_categories(self, state: SkillCategoryState) -> None:
+        values = state.as_ui_config()
+        ui = self.config.setdefault("ui", {})
+        ui.update(values)
+        save_local_settings({"ui": values})
+        self.skillsChanged.emit()
+
+    @Slot(str, result=bool)
+    def addSkillCategory(self, name: str) -> bool:
+        state = self._skill_category_state()
+        changed, message = state.add(name)
+        self._set_skill_category_status(message)
+        if changed:
+            self._save_skill_categories(state)
+        return changed
+
+    @Slot(str, str, result=bool)
+    def renameSkillCategory(self, old_name: str, new_name: str) -> bool:
+        state = self._skill_category_state()
+        changed, message = state.rename(old_name, new_name)
+        self._set_skill_category_status(message)
+        if changed:
+            self._save_skill_categories(state)
+        return changed
+
+    @Slot(str, result=bool)
+    def removeSkillCategory(self, name: str) -> bool:
+        state = self._skill_category_state()
+        changed, message = state.remove(name)
+        self._set_skill_category_status(message)
+        if changed:
+            self._save_skill_categories(state)
+        return changed
+
+    @Slot(str, int, result=bool)
+    def moveSkillCategory(self, name: str, offset: int) -> bool:
+        state = self._skill_category_state()
+        changed, message = state.move(name, offset)
+        self._set_skill_category_status(message)
+        if changed:
+            self._save_skill_categories(state)
+        return changed
+
+    @Slot(str, str)
+    def setSkillCategory(self, skill_id: str, category: str) -> None:
+        state = self._skill_category_state()
+        changed, message = state.assign(skill_id, category)
+        self._set_skill_category_status(message)
+        if changed:
+            self._save_skill_categories(state)
+
     @Slot(bool)
     def setSkillSidebarExpanded(self, expanded: bool) -> None:
         self.config.setdefault("ui", {})["skill_sidebar_expanded"] = expanded
@@ -1186,6 +1266,7 @@ class AssistantBridge(QObject):
             return
         self._closing = True
         self._schedule_timer.stop()
+        self._startup_timer.stop()
         self._task_cancel_event.set()
         self._scheduled_cancel_event.set()
         self._confirmation_event.set()

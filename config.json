@@ -35,7 +35,9 @@
   "ui": {
     "skill_sidebar_expanded": true,
     "favorite_sidebar_expanded": false,
-    "favorite_skills": []
+    "favorite_skills": [],
+    "custom_skill_categories": [],
+    "skill_category_overrides": {}
   },
   "skills": {
     "wake-word": true,

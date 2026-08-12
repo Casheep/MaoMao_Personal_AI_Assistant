@@ -65,7 +65,7 @@ SKILL_CATALOG: tuple[SkillDefinition, ...] = (
         "设备与自动化",
         ("create_scheduled_task", "list_scheduled_tasks", "cancel_scheduled_task"),
     ),
-    SkillDefinition("current-time", "当前时间", "读取这台电脑当前的日期和时间。", "基础能力", ("get_current_time",)),
+    SkillDefinition("current-time", "当前时间", "读取这台电脑当前的日期和时间。", "电脑与浏览器", ("get_current_time",)),
 )
 
 
@@ -75,7 +75,6 @@ SKILL_CATEGORY_ORDER: tuple[str, ...] = (
     "屏幕与视觉",
     "记忆与文件",
     "设备与自动化",
-    "基础能力",
 )
 
 SKILLS_BY_ID = {skill.id: skill for skill in SKILL_CATALOG}

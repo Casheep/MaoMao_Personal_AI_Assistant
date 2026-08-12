@@ -20,7 +20,7 @@ if (-not $versionMatch.Success) {
     throw "Unable to parse the version from commit $commitHash."
 }
 $version = $versionMatch.Groups[1].Value
-$seriesMatch = [regex]::Match($version, '^(v\d+\.\d+\.\d+)_')
+$seriesMatch = [regex]::Match($version, '^(v\d+\.\d+\.\d+)(?:_|$)')
 if (-not $seriesMatch.Success) {
     throw "Unsupported MaoMao version format: $version"
 }
@@ -42,7 +42,11 @@ try {
     & git -C $projectRoot archive --format=zip --output=$temporarySource $commitHash
     if ($LASTEXITCODE -ne 0) { throw 'Creating the tracked-source archive failed.' }
 
-    & git -C $projectRoot bundle create $temporaryBundle beta
+    $bundleBranch = (& git -C $projectRoot branch --show-current).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $bundleBranch) {
+        throw 'Creating a history bundle requires a checked-out branch.'
+    }
+    & git -C $projectRoot bundle create $temporaryBundle $bundleBranch
     if ($LASTEXITCODE -ne 0) { throw 'Creating the Git history bundle failed.' }
     & git -C $projectRoot bundle verify $temporaryBundle | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Verifying the Git history bundle failed.' }

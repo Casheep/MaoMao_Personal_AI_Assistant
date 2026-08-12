@@ -1,14 +1,9 @@
 from __future__ import annotations
 
 import json
-import shutil
-import stat
-import tempfile
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from urllib.request import Request, urlopen
 
 from .config import PROJECT_ROOT
 
@@ -88,6 +83,9 @@ def extract_component_archive(
     component: RuntimeComponent,
 ) -> None:
     """Extract data-only component files with strict path and size checks."""
+    import stat
+    import zipfile
+
     extracted_root.mkdir()
     extracted_resolved = extracted_root.resolve()
     with zipfile.ZipFile(archive_path) as archive:
@@ -118,6 +116,10 @@ def install_component(
     root: Path = PROJECT_ROOT,
     progress: ProgressCallback | None = None,
 ) -> Path:
+    import shutil
+    import tempfile
+    from urllib.request import Request, urlopen
+
     component = COMPONENTS_BY_ID[component_id]
     destination = (root / component.install_directory).resolve()
     project_root = root.resolve()
