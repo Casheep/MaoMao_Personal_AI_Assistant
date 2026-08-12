@@ -4,7 +4,6 @@ All notable changes to MaoMao Personal AI Assistant are recorded here.
 
 ## [v0.0.2] - 2026-08-12
 
-- Promoted the completed `v0.0.2_beta3` feature set to the stable `v0.0.2` release.
 - Replaced the legacy desktop interfaces with a single Qt Quick/PySide6 GUI and consistent rounded controls.
 - Added text and voice conversation, wake words, continuous conversation, tray controls, skills, permissions, schedules and integration settings.
 - Added persistent, validated and reorderable custom skill categories plus search across skills, favorites and skill assignment.
@@ -16,7 +15,6 @@ All notable changes to MaoMao Personal AI Assistant are recorded here.
 
 ## [v0.0.2_beta3] - 2026-08-12
 
-- Initialized the next beta development version from `v0.0.2_beta2`.
 - Folded the broad base-ability category into the computer-and-browser category.
 - Added persistent custom skill categories with validation, reordering, confirmed deletion and per-skill assignment.
 - Added independent search with clear controls and result counts to the skill library, favorites panel and skill-assignment list.
@@ -31,7 +29,6 @@ All notable changes to MaoMao Personal AI Assistant are recorded here.
 
 ## [v0.0.2_beta2] - 2026-08-12
 
-- Initialized the next beta development version from `v0.0.2_beta1`.
 - Added rounded popup, selection, checkbox, progress and text-input surfaces throughout the Qt Quick interface.
 - Added a local committed-source and Git-history archive helper for post-commit snapshots.
 - Corrected the developer attribution to `casheep` across application metadata and interfaces.
