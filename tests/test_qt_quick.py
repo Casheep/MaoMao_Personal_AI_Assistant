@@ -72,10 +72,16 @@ class QtQuickMigrationTests(unittest.TestCase):
         finally:
             bridge.close()
 
-    def test_v002_is_the_single_runtime_version(self) -> None:
-        self.assertEqual(__version__, "v0.0.2_beta3")
+    def test_public_pep440_and_windows_versions_use_their_required_formats(self) -> None:
+        self.assertEqual(__version__, "v0.0.3_beta1")
         project = Path("pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.0.2b3"', project)
+        self.assertIn('version = "0.0.3b1"', project)
+        launcher = Path("launcher/MaoMaoLauncher.cs").read_text(encoding="utf-8")
+        self.assertIn('AssemblyVersion("0.0.3.0")', launcher)
+        self.assertIn('AssemblyFileVersion("0.0.3.0")', launcher)
+        for manifest_path in ("launcher/app.manifest", "launcher/beta.manifest"):
+            manifest = Path(manifest_path).read_text(encoding="utf-8")
+            self.assertIn('assemblyIdentity version="0.0.3.0"', manifest)
 
     def test_launcher_uses_qt_quick_entrypoint(self) -> None:
         source = Path("launcher/MaoMaoLauncher.cs").read_text(encoding="utf-8")
@@ -157,6 +163,12 @@ class QtQuickMigrationTests(unittest.TestCase):
         source = Path("assistant_app/qt_quick/app.py").read_text(encoding="utf-8")
         self.assertIn("QLocalServer", source)
         self.assertIn("bridge.showWindowRequested.emit()", source)
+
+    def test_wake_word_does_not_force_the_window_to_front(self) -> None:
+        source = Path("assistant_app/qt_quick/bridge.py").read_text(encoding="utf-8")
+        wake_handler = source[source.index("def _handle_wake"):source.index("def _wake_and_record")]
+        self.assertNotIn("showWindowRequested.emit()", wake_handler)
+        self.assertIn("self._voice_executor.submit(self._wake_and_record)", wake_handler)
 
     def test_qt_shell_preserves_the_previous_three_column_layout(self) -> None:
         qml = Path("assistant_app/qt_quick/qml/Main.qml").read_text(encoding="utf-8")
@@ -265,6 +277,119 @@ class QtQuickMigrationTests(unittest.TestCase):
         self.assertIn('contentWidth: availableWidth', qml)
         self.assertIn('Layout.preferredWidth: (skillCategoryScroll.availableWidth - 2) / 2', qml)
         self.assertNotIn('"基础能力"]', qml)
+
+    def test_bottom_creator_toolbar_has_workflow_and_code_generators(self) -> None:
+        main_qml = Path("assistant_app/qt_quick/qml/Main.qml").read_text(encoding="utf-8")
+        toolbar = Path("assistant_app/qt_quick/qml/CreatorToolbar.qml").read_text(encoding="utf-8")
+        bridge = Path("assistant_app/qt_quick/bridge.py").read_text(encoding="utf-8")
+        self.assertIn('objectName: "creatorToolbar"', main_qml)
+        self.assertIn('text: "组合技能"', toolbar)
+        self.assertIn('text: "代码技能"', toolbar)
+        self.assertIn("Kimi K3", toolbar)
+        self.assertIn("Kimi K3 harness", toolbar)
+        self.assertIn('model="kimi-k3"', bridge)
+        self.assertIn('getattr(agent.client, "kimi", None)', bridge)
+        self.assertNotIn("ask_chatgpt", toolbar)
+        self.assertNotIn("Kimi K3 技能生成", toolbar)
+        self.assertNotIn("个生成技能", toolbar)
+        self.assertIn('"#EEE9FF"', toolbar)
+        self.assertIn('text: "工具栏"', toolbar)
+        self.assertNotIn('text: root.expanded ?', toolbar)
+
+    def test_expanded_creator_toolbar_stays_inside_the_window(self) -> None:
+        engine, bridge = create_engine(self.app)
+        bridge._startup_timer.stop()
+        try:
+            root = engine.rootObjects()[0]
+            toolbar = root.findChild(QObject, "creatorToolbar")
+            toolbar_toggle = root.findChild(QObject, "creatorToolbarToggle")
+            toolbar_drawer = root.findChild(QObject, "creatorToolbarDrawer")
+            audio_card = root.findChild(QObject, "audioControlCard")
+            history_card = root.findChild(QObject, "historyCard")
+            input_card = root.findChild(QObject, "inputCard")
+            self.assertIsNotNone(toolbar)
+            self.assertIsNotNone(toolbar_toggle)
+            self.assertIsNotNone(toolbar_drawer)
+            self.assertIsNotNone(audio_card)
+            self.assertIsNotNone(history_card)
+            self.assertIsNotNone(input_card)
+            root.setWidth(1280)
+            root.setHeight(800)
+            toolbar.setProperty("expanded", False)
+            QTest.qWait(180)
+            self.assertTrue(toolbar_toggle.property("visible"))
+            self.assertFalse(toolbar_drawer.property("visible"))
+            self.assertEqual(float(toolbar.property("height")), 36)
+            self.assertTrue(input_card.property("visible"))
+            collapsed_history_height = float(history_card.property("height"))
+            self.assertTrue(QMetaObject.invokeMethod(toolbar_toggle, "click"))
+            QTest.qWait(180)
+            self.assertTrue(toolbar.property("expanded"))
+            self.assertTrue(toolbar.property("visible"))
+            self.assertTrue(toolbar_toggle.property("visible"))
+            self.assertTrue(toolbar_drawer.property("visible"))
+            self.assertTrue(audio_card.property("visible"))
+            self.assertFalse(input_card.property("visible"))
+            self.assertGreater(float(toolbar.property("height")), 250)
+            self.assertLess(float(history_card.property("height")), collapsed_history_height)
+            self.assertGreaterEqual(float(toolbar.property("y")), 0)
+            self.assertLessEqual(float(toolbar.property("y")) + float(toolbar.property("height")), 800)
+            self.assertTrue(QMetaObject.invokeMethod(toolbar_toggle, "click"))
+            QTest.qWait(180)
+            self.assertFalse(toolbar.property("expanded"))
+            self.assertTrue(toolbar_toggle.property("visible"))
+            self.assertFalse(toolbar_drawer.property("visible"))
+            self.assertTrue(audio_card.property("visible"))
+            self.assertTrue(input_card.property("visible"))
+        finally:
+            bridge.close()
+
+    def test_creator_toolbar_stays_below_input_and_between_sidebars(self) -> None:
+        engine, bridge = create_engine(self.app)
+        bridge._startup_timer.stop()
+        try:
+            root = engine.rootObjects()[0]
+            toolbar = root.findChild(QObject, "creatorToolbar")
+            toggle = root.findChild(QObject, "creatorToolbarToggle")
+            drawer = root.findChild(QObject, "creatorToolbarDrawer")
+            input_card = root.findChild(QObject, "inputCard")
+            skill_slot = root.findChild(QObject, "skillSlot")
+            favorite_slot = root.findChild(QObject, "favoriteSlot")
+            for width, height in ((1280, 800), (960, 560)):
+                root.setWidth(width)
+                root.setHeight(height)
+                toolbar.setProperty("expanded", False)
+                QTest.qWait(170)
+                collapsed_toolbar_origin = toolbar.mapToGlobal(QPointF(0, 0))
+                collapsed_input_origin = input_card.mapToGlobal(QPointF(0, 0))
+                self.assertGreaterEqual(
+                    collapsed_toolbar_origin.y(),
+                    collapsed_input_origin.y() + float(input_card.property("height")),
+                )
+                self.assertTrue(QMetaObject.invokeMethod(toggle, "click"))
+                QTest.qWait(170)
+                self.assertTrue(toggle.property("visible"))
+                self.assertTrue(drawer.property("visible"))
+                toolbar_origin = toolbar.mapToGlobal(QPointF(0, 0))
+                skill_origin = skill_slot.mapToGlobal(QPointF(0, 0))
+                favorite_origin = favorite_slot.mapToGlobal(QPointF(0, 0))
+                self.assertFalse(input_card.property("visible"))
+                self.assertTrue(root.findChild(QObject, "audioControlCard").property("visible"))
+                self.assertGreater(
+                    toolbar_origin.x(),
+                    skill_origin.x() + float(skill_slot.property("width")),
+                )
+                self.assertLess(
+                    toolbar_origin.x() + float(toolbar.property("width")),
+                    favorite_origin.x(),
+                )
+                self.assertGreaterEqual(toolbar_origin.y(), 0)
+                self.assertLessEqual(
+                    toolbar_origin.y() + float(toolbar.property("height")),
+                    height,
+                )
+        finally:
+            bridge.close()
 
     def test_resizing_to_compact_closes_sidebars_without_reopening_them(self) -> None:
         engine, bridge = create_engine(self.app)

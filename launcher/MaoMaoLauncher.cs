@@ -11,8 +11,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("猫猫")]
 [assembly: AssemblyProduct("猫猫")]
 [assembly: AssemblyCopyright("Copyright © 2026")]
-[assembly: AssemblyVersion("0.0.2.0")]
-[assembly: AssemblyFileVersion("0.0.2.0")]
+[assembly: AssemblyVersion("0.0.3.0")]
+[assembly: AssemblyFileVersion("0.0.3.0")]
 
 internal static class MaoMaoLauncher
 {

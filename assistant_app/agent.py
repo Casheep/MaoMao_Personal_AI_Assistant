@@ -476,16 +476,30 @@ class PersonalAgent:
         self._store_exchange(text, answer)
         return AgentAnswer("", route, 0.0, silent=True)
 
-    def run(self, text: str, input_mode: str = "text") -> AgentAnswer:
+    def run(
+        self,
+        text: str,
+        input_mode: str = "text",
+        allowed_tools: set[str] | None = None,
+    ) -> AgentAnswer:
         task_id = new_task_id()
         route = choose_route(text, self.config["routing"])
         direct_chatgpt_question = self._direct_chatgpt_question(text)
-        if direct_chatgpt_question is not None and is_skill_enabled(self.config, "browser-navigation"):
+        if (
+            direct_chatgpt_question is not None
+            and (allowed_tools is None or "ask_chatgpt" in allowed_tools)
+            and is_skill_enabled(self.config, "browser-navigation")
+        ):
             return self._run_direct_chatgpt(text, direct_chatgpt_question, task_id, route)
         local_skill = match_local_skill(text, self.config)
-        if local_skill is not None:
+        if local_skill is not None and (
+            allowed_tools is None or local_skill.tool_name in allowed_tools
+        ):
             return self._run_local_skill(text, task_id, local_skill)
-        if is_skill_enabled(self.config, "visual-action-shortcuts"):
+        if (
+            (allowed_tools is None or "run_visual_shortcut" in allowed_tools)
+            and is_skill_enabled(self.config, "visual-action-shortcuts")
+        ):
             matcher = getattr(self.tools, "match_visual_shortcut", None)
             shortcut = matcher(text) if callable(matcher) else None
             if shortcut is not None:
@@ -494,10 +508,18 @@ class PersonalAgent:
                 )
                 if shortcut_answer is not None:
                     return shortcut_answer
-        if self._direct_starrail_dailies(text) and is_skill_enabled(self.config, "starrail-dailies"):
+        if (
+            (allowed_tools is None or "run_starrail_dailies" in allowed_tools)
+            and self._direct_starrail_dailies(text)
+            and is_skill_enabled(self.config, "starrail-dailies")
+        ):
             return self._run_direct_starrail_dailies(text, task_id, route)
         direct_lamp_power = self._direct_lamp_power(text)
-        if direct_lamp_power is not None and is_skill_enabled(self.config, "desk-lamp"):
+        if (
+            direct_lamp_power is not None
+            and (allowed_tools is None or "control_desk_lamp" in allowed_tools)
+            and is_skill_enabled(self.config, "desk-lamp")
+        ):
             return self._run_direct_lamp_power(
                 text,
                 input_mode,
@@ -508,6 +530,13 @@ class PersonalAgent:
         model = route.model
         reasoning = route.reasoning
         messages = self._messages(text, input_mode)
+        tool_schemas = self.tools.schemas
+        if allowed_tools is not None:
+            tool_schemas = [
+                schema
+                for schema in tool_schemas
+                if str((schema.get("function") or {}).get("name") or "") in allowed_tools
+            ]
         tool_calls = 0
         k3_calls = 0
         screenshots = 0
@@ -526,7 +555,7 @@ class PersonalAgent:
                     raise RuntimeError("当前任务的 K3 调用次数已达到安全上限。")
             response = self.client.chat(
                 messages=messages,
-                tools=self.tools.schemas,
+                tools=tool_schemas,
                 model=model,
                 reasoning=reasoning,
                 task_id=task_id,

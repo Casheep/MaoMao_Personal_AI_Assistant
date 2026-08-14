@@ -1,9 +1,9 @@
 [project]
 name = "MaoMao_Personal_AI_Assistant"
-version = "0.0.2b3"
+version = "0.0.3b1"
 description = "A private, local-first Windows voice assistant."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.14"
 authors = [{ name = "casheep" }]
 
 [tool.unittest]

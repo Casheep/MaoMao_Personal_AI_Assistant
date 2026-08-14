@@ -22,18 +22,26 @@ $launcherManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $launcherMa
 $launcherCache = Join-Path $releaseCache "launchers\MaoMao-$launcherSourceHash-$launcherManifestHash.exe"
 $compatibleLauncherCache = Join-Path $releaseCache 'launchers\MaoMao.exe'
 if ($RebuildLauncher) { $CompileLauncher = $true }
-if (-not $RebuildLauncher -and -not (Test-Path -LiteralPath $launcherCache) -and (Test-Path -LiteralPath $compatibleLauncherCache)) {
-    # The launcher behavior is version-independent. Reusing a previously
-    # verified binary also avoids repeated scans of newly compiled executables.
+$versionSource = Get-Content -LiteralPath (Join-Path $projectRoot 'assistant_app\version.py') -Raw -Encoding UTF8
+$versionMatch = [regex]::Match($versionSource, '__version__\s*=\s*"([^"]+)"')
+if (-not $versionMatch.Success) { throw 'Unable to read the MaoMao version.' }
+$releaseVersion = $versionMatch.Groups[1].Value
+$windowsVersionMatch = [regex]::Match($releaseVersion, '^v(\d+)\.(\d+)\.(\d+)')
+if (-not $windowsVersionMatch.Success) { throw 'Unable to derive the Windows launcher version.' }
+$expectedLauncherVersion = "$($windowsVersionMatch.Groups[1].Value).$($windowsVersionMatch.Groups[2].Value).$($windowsVersionMatch.Groups[3].Value).0"
+
+function Test-LauncherVersion([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $fileVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Path).FileVersion
+    return $fileVersion -eq $expectedLauncherVersion
+}
+
+if (-not $RebuildLauncher -and -not $CompileLauncher -and -not (Test-Path -LiteralPath $launcherCache) -and (Test-LauncherVersion $compatibleLauncherCache)) {
     $launcherCache = $compatibleLauncherCache
 }
 if (-not (Test-Path -LiteralPath $launcherCache) -and -not $CompileLauncher) {
     throw 'No verified launcher is available. Build in GitHub Actions or pass -CompileLauncher in a trusted build environment.'
 }
-$versionSource = Get-Content -LiteralPath (Join-Path $projectRoot 'assistant_app\version.py') -Raw -Encoding UTF8
-$versionMatch = [regex]::Match($versionSource, '__version__\s*=\s*"([^"]+)"')
-if (-not $versionMatch.Success) { throw 'Unable to read the MaoMao version.' }
-$releaseVersion = $versionMatch.Groups[1].Value
 
 function Remove-BuildPath([string]$Path, [string]$AllowedParent) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
@@ -76,11 +84,13 @@ if (-not $runtimeCache) {
     }
     $basePython = if ($PythonHome) { Join-Path $PythonHome 'python.exe' } else { '' }
     if (-not $basePython -or -not (Test-Path -LiteralPath $basePython)) {
-        $PythonHome = & py -3.10 -c "import sys; print(sys.base_prefix)"
-        if ($LASTEXITCODE -ne 0) { throw 'Python 3.10 or newer is required to build the portable runtime.' }
+        $PythonHome = & py -3.12 -c "import sys; print(sys.base_prefix)"
+        if ($LASTEXITCODE -ne 0) { throw 'Python 3.12 is required to build the portable runtime.' }
         $PythonHome = $PythonHome.Trim()
         $basePython = Join-Path $PythonHome 'python.exe'
     }
+    & $basePython -c "import sys; raise SystemExit(0 if (3, 12) <= sys.version_info < (3, 14) else 1)"
+    if ($LASTEXITCODE -ne 0) { throw 'The portable runtime requires Python 3.12 or 3.13.' }
     $pythonTag = (& $basePython -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')").Trim()
     $runtimeCache = Join-Path $releaseCache "python$pythonTag-$requirementsHash"
     if ($RebuildRuntime -and (Test-Path -LiteralPath $runtimeCache)) {
@@ -115,7 +125,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $runtimeCache 'pythonw.exe'))) {
         $_.Name -match '^LICENSE'
     } | Copy-Item -Destination $buildingRuntime
 
-    $pipCache = Join-Path $releaseCache 'pip'
+    $pipCache = Join-Path $releaseCache "pip-$requirementsHash"
     New-Item -ItemType Directory -Path $pipCache -Force | Out-Null
     & $basePython -m pip install --disable-pip-version-check --no-warn-script-location --cache-dir $pipCache --target $baseSitePackages -r $requirements
     if ($LASTEXITCODE -ne 0) { throw 'Installing portable API dependencies failed.' }
@@ -133,7 +143,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $runtimeCache 'pythonw.exe'))) {
 
 New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
 $existingLauncher = Join-Path $stage 'MaoMao.exe'
-if (-not $RebuildLauncher -and -not (Test-Path -LiteralPath $launcherCache) -and (Test-Path -LiteralPath $existingLauncher)) {
+if (-not $RebuildLauncher -and -not $CompileLauncher -and -not (Test-Path -LiteralPath $launcherCache) -and (Test-LauncherVersion $existingLauncher)) {
     New-Item -ItemType Directory -Path (Split-Path -Parent $launcherCache) -Force | Out-Null
     Copy-Item -LiteralPath $existingLauncher -Destination $launcherCache
 }
@@ -234,6 +244,10 @@ if (-not (Test-Path -LiteralPath $launcherCache)) {
     }
 }
 Copy-Item -LiteralPath $launcherCache -Destination $launcherOutput
+if (-not (Test-LauncherVersion $launcherOutput)) {
+    $actualLauncherVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($launcherOutput).FileVersion
+    throw "Launcher version mismatch: expected $expectedLauncherVersion, got $actualLauncherVersion. Rebuild with -RebuildLauncher."
+}
 
 $forbiddenNames = @('assistant.db', 'xiaomi_token.txt', 'config.local.json', 'wake-templates.npz')
 $forbiddenFiles = Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object { $forbiddenNames -contains $_.Name }

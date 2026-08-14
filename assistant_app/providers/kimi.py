@@ -31,6 +31,7 @@ class KimiClient:
         budget: BudgetManager,
         session_id: str,
     ) -> None:
+        self._api_key = api_key
         self.config = config
         self.database = database
         self.budget = budget
@@ -40,6 +41,17 @@ class KimiClient:
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=float(config["api"]["timeout_seconds"]),
         )
+
+    def generate_code_skill(self, description: str) -> dict[str, Any]:
+        from ..code_skill_harness import KimiCodeSkillHarness
+
+        return KimiCodeSkillHarness(
+            api_key=self._api_key,
+            base_url=str(self.config["api"]["base_url"]),
+            database=self.database,
+            budget=self.budget,
+            session_id=self.session_id,
+        ).generate(description)
 
     def chat(
         self,
@@ -58,12 +70,13 @@ class KimiClient:
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
             "max_completion_tokens": max_tokens,
             "stream": False,
             "prompt_cache_key": self.session_id,
         }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         if model == "kimi-k3":
             payload["reasoning_effort"] = reasoning if reasoning in {"low", "high", "max"} else "low"
         else:

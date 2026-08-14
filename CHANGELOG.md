@@ -2,9 +2,18 @@
 
 All notable changes to MaoMao Personal AI Assistant are recorded here.
 
+## [v0.0.3_beta1] - 2026-08-12
+
+- Added an arrow-free purple creator tab in the central column; expanding it yields the message-input space, reduces conversation history and keeps audio controls and both sidebars available.
+- Added Kimi K3-only generators for composing existing tools into reusable workflows and creating Python-backed skills.
+- Upgraded the runtime baseline to Python 3.12 and moved code-skill creation onto the official Kimi Agent SDK harness with bounded repair attempts, task-scoped temporary file tools and a bounded Shell, without subagents.
+- Added structured draft previews, local persistence, generated-skill discovery, enablement, favorites and deletion.
+- Added tool-bound workflow validation and static Python checks for imports, top-level behavior, declared permissions and dynamic execution.
+- Added saved-code hash verification, repeated static validation, per-run confirmation and time-limited child-process execution for generated code skills.
+- Kept wake-word listening and voice interaction in the background without restoring or focusing a minimized window.
+
 ## [v0.0.2_beta3] - 2026-08-12
 
-- Initialized the next beta development version from `v0.0.2_beta2`.
 - Folded the broad base-ability category into the computer-and-browser category.
 - Added persistent custom skill categories with validation, reordering, confirmed deletion and per-skill assignment.
 - Added independent search with clear controls and result counts to the skill library, favorites panel and skill-assignment list.
@@ -19,10 +28,7 @@ All notable changes to MaoMao Personal AI Assistant are recorded here.
 
 ## [v0.0.2_beta2] - 2026-08-12
 
-- Initialized the next beta development version from `v0.0.2_beta1`.
 - Added rounded popup, selection, checkbox, progress and text-input surfaces throughout the Qt Quick interface.
-- Added a local committed-source and Git-history archive helper for post-commit snapshots.
-- Corrected the developer attribution to `casheep` across application metadata and interfaces.
 - Deferred conversation, HTTP and audio-device dependencies until their features are first used.
 - Removed repeated wake-template calibration at startup and optimized MFCC framing, DTW memory use and real-time audio buffering.
 - Added versioned database initialization, query indexes and a single-query usage snapshot for budget checks.
@@ -43,6 +49,5 @@ All notable changes to MaoMao Personal AI Assistant are recorded here.
 
 ## [v0.0.1_beta1] - 2026-08-11
 
-- Initial private development release.
 - Local memory, wake words, continuous conversation, computer control and scheduled tasks.
 - Kimi and MiMo text routing, local/API ASR, and local/API TTS choices.

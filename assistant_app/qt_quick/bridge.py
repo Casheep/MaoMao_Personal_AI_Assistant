@@ -24,10 +24,11 @@ from ..budget import BudgetExceeded
 from ..components import COMPONENTS_BY_ID, install_component, missing_startup_components
 from ..config import app_paths, load_config, save_local_settings
 from ..database import Database
+from ..generated_skills import GeneratedSkillStore, generation_prompt, parse_generated_skill
 from ..runtime import build_agent
 from ..secrets import key_configuration_status, save_api_keys
 from ..skill_categories import SkillCategoryState
-from ..skills import SKILL_CATALOG, is_skill_enabled
+from ..skills import SKILL_CATALOG, TOOL_SKILLS, is_skill_enabled
 from ..tts import ENGINE_BACKENDS, ENGINE_LABELS, MIMO_VOICES, VOICE_PRESETS, SpeechSynthesizer
 
 
@@ -63,6 +64,7 @@ class AssistantBridge(QObject):
     integrationStatusChanged = Signal()
     startupChanged = Signal()
     uiSettingsChanged = Signal()
+    skillGeneratorChanged = Signal()
     confirmationRequested = Signal(str, str, bool)
     asrFallbackRequested = Signal(str)
     notificationRequested = Signal(str, str)
@@ -81,6 +83,8 @@ class AssistantBridge(QObject):
     _enrollmentFinished = Signal(bool, str)
     _startupProgressReady = Signal(int, str)
     _preloadStateReady = Signal(bool)
+    _skillDraftReady = Signal(object)
+    _skillGenerationFailed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -93,6 +97,10 @@ class AssistantBridge(QObject):
         self._recording = False
         self._speaking = False
         self._preload_loading = False
+        self._skill_generator_busy = False
+        self._skill_generator_kind = "workflow"
+        self._skill_generator_status = ""
+        self._generated_skill_draft: dict[str, Any] = {}
         self._closing = False
         self._status = "正在初始化…"
         self._skill_category_status = ""
@@ -139,6 +147,7 @@ class AssistantBridge(QObject):
         )
         self._wake_listener.set_capture_enabled(self._wake_enabled)
         self._ui_database = Database(app_paths().database)
+        self._generated_skill_store = GeneratedSkillStore(app_paths().data / "generated_skills")
         self._ui_database.recover_interrupted_scheduled_tasks()
         self._startup_components = missing_startup_components()
         self._startup_progress = 0
@@ -157,6 +166,8 @@ class AssistantBridge(QObject):
         self._enrollmentFinished.connect(self._finish_enrollment)
         self._startupProgressReady.connect(self._set_startup_progress)
         self._preloadStateReady.connect(self._set_preload_loading)
+        self._skillDraftReady.connect(self._finish_skill_generation)
+        self._skillGenerationFailed.connect(self._fail_skill_generation)
 
         self._schedule_timer = QTimer(self)
         self._schedule_timer.setInterval(1500)
@@ -177,7 +188,7 @@ class AssistantBridge(QObject):
     def skills(self) -> list[dict[str, Any]]:
         favorites = set(self.config.get("ui", {}).get("favorite_skills", []))
         category_state = self._skill_category_state()
-        return [
+        builtin = [
             {
                 "id": skill.id,
                 "name": skill.name,
@@ -190,13 +201,49 @@ class AssistantBridge(QObject):
             }
             for skill in SKILL_CATALOG
         ]
+        generated = [
+            {
+                "id": str(skill.get("id") or ""),
+                "name": str(skill.get("name") or "未命名技能"),
+                "description": str(skill.get("description") or ""),
+                "category": str(skill.get("category") or "自定义技能"),
+                "enabled": bool(skill.get("enabled", True)),
+                "favorite": str(skill.get("id") or "") in favorites,
+                "hasSettings": False,
+                "generated": True,
+                "kind": str(skill.get("kind") or "workflow"),
+            }
+            for skill in self._generated_skill_store.load()
+        ]
+        return builtin + generated
 
     def _skill_category_state(self) -> SkillCategoryState:
         return SkillCategoryState.from_ui_config(self.config.get("ui", {}))
 
     @Property("QVariantList", notify=skillsChanged)
     def skillCategories(self) -> list[str]:
-        return self._skill_category_state().categories
+        categories = list(self._skill_category_state().categories)
+        for skill in self._generated_skill_store.load():
+            category = str(skill.get("category") or "自定义技能")
+            if category not in categories:
+                categories.append(category)
+        return categories
+
+    @Property("QVariantList", notify=skillGeneratorChanged)
+    def generatedSkills(self) -> list[dict[str, Any]]:
+        return self._generated_skill_store.load()
+
+    @Property("QVariantMap", notify=skillGeneratorChanged)
+    def generatedSkillDraft(self) -> dict[str, Any]:
+        return dict(self._generated_skill_draft)
+
+    @Property(bool, notify=skillGeneratorChanged)
+    def skillGeneratorBusy(self) -> bool:
+        return self._skill_generator_busy
+
+    @Property(str, notify=skillGeneratorChanged)
+    def skillGeneratorStatus(self) -> str:
+        return self._skill_generator_status
 
     @Property("QVariantList", notify=skillsChanged)
     def customSkillCategories(self) -> list[str]:
@@ -409,12 +456,36 @@ class AssistantBridge(QObject):
 
     def _run_prompt(self, text: str, input_mode: str) -> None:
         try:
+            generated_skill = self._generated_skill_store.match(text)
+            generated_meta = ""
+            generated_allowed_tools: set[str] | None = None
+            if generated_skill is not None:
+                generated_meta = f"用户技能 · {generated_skill.get('name', '未命名技能')}"
+                if generated_skill.get("kind") == "code":
+                    self._generated_skill_store.verify_code(generated_skill)
+                    arguments = {
+                        "skill_id": generated_skill.get("id"),
+                        "skill": generated_skill.get("name"),
+                        "permissions": generated_skill.get("permissions", []),
+                        "code_sha256": generated_skill.get("code_sha256"),
+                        "description": f"执行代码技能：{generated_skill.get('name', '未命名技能')}",
+                    }
+                    if not self._confirm_tool("run_generated_code", arguments):
+                        self._answerReady.emit("已取消执行代码技能。", generated_meta, input_mode)
+                        return
+                    result = self._generated_skill_store.execute_code(generated_skill, text)
+                    self._answerReady.emit(result, generated_meta, input_mode)
+                    return
+                generated_allowed_tools = set(map(str, generated_skill.get("required_tools", [])))
+                text = self._generated_skill_store.workflow_prompt(generated_skill, text)
             agent, _database, _tts = self._ensure_runtime()
-            answer = agent.run(text, input_mode=input_mode)
+            answer = agent.run(text, input_mode=input_mode, allowed_tools=generated_allowed_tools)
             reason = "、".join(answer.route.reasons)
             meta = f"{answer.route.model} · {answer.route.reasoning}"
             if reason:
                 meta += f" · {reason}"
+            if generated_meta:
+                meta += f" · {generated_meta}"
             self._answerReady.emit(answer.text, meta, input_mode)
         except BudgetExceeded as exc:
             self._taskFailed.emit(f"预算限制：{exc}")
@@ -650,7 +721,6 @@ class AssistantBridge(QObject):
     def _handle_wake(self) -> None:
         if not self._wake_enabled or self._closing:
             return
-        self.showWindowRequested.emit()
         self.pauseAll()
         self._continuous_session = self.continuousEnabled
         self._set_status("已唤醒，正在听…")
@@ -788,6 +858,8 @@ class AssistantBridge(QObject):
 
     @staticmethod
     def _permission_category(name: str) -> str:
+        if name == "run_generated_code":
+            return "生成代码"
         if name == "open_url":
             return "网站"
         if name in {"click_screen", "type_text", "add_app_to_allowlist"}:
@@ -797,6 +869,8 @@ class AssistantBridge(QObject):
         return "其他"
 
     def _permission_label(self, name: str, arguments: dict[str, Any], key: str) -> str:
+        if name == "run_generated_code":
+            return f"代码技能 · {arguments.get('skill') or key}"
         if name == "open_url":
             return urlparse(str(arguments.get("url") or "")).hostname or key
         if name in {"click_screen", "type_text"}:
@@ -868,7 +942,9 @@ class AssistantBridge(QObject):
         details = json.dumps(display, ensure_ascii=False, indent=2, default=str)
         if len(details) > 1200:
             details = details[:1200] + "\n…"
-        high_risk = bool(HIGH_RISK_PATTERN.search(str(arguments.get("description") or "") + details))
+        high_risk = name == "run_generated_code" or bool(
+            HIGH_RISK_PATTERN.search(str(arguments.get("description") or "") + details)
+        )
         self._pending_confirmation = (name, arguments, key, high_risk)
         self._confirmation_result = False
         self._confirmation_remember = False
@@ -1005,6 +1081,11 @@ class AssistantBridge(QObject):
 
     @Slot(str, bool)
     def setSkillEnabled(self, skill_id: str, enabled: bool) -> None:
+        if skill_id.startswith("generated-"):
+            if self._generated_skill_store.set_enabled(skill_id, enabled):
+                self.skillsChanged.emit()
+                self.skillGeneratorChanged.emit()
+            return
         if not any(skill.id == skill_id for skill in SKILL_CATALOG):
             return
         if skill_id == "wake-word":
@@ -1019,7 +1100,11 @@ class AssistantBridge(QObject):
 
     @Slot(str, bool)
     def setSkillFavorite(self, skill_id: str, favorite: bool) -> None:
-        if not any(skill.id == skill_id for skill in SKILL_CATALOG):
+        known_generated = any(
+            str(skill.get("id") or "") == skill_id
+            for skill in self._generated_skill_store.load()
+        )
+        if not known_generated and not any(skill.id == skill_id for skill in SKILL_CATALOG):
             return
         favorites = list(self.config.setdefault("ui", {}).get("favorite_skills", []))
         if favorite and skill_id not in favorites:
@@ -1029,6 +1114,106 @@ class AssistantBridge(QObject):
         self.config["ui"]["favorite_skills"] = favorites
         save_local_settings({"ui": {"favorite_skills": favorites}})
         self.skillsChanged.emit()
+
+    def _generate_skill_worker(self, kind: str, description: str) -> None:
+        try:
+            agent, _database, _tts = self._ensure_runtime()
+            kimi = getattr(agent.client, "kimi", None)
+            if kimi is None:
+                raise RuntimeError("Kimi K3 客户端不可用")
+            if kind == "code":
+                draft = kimi.generate_code_skill(description)
+            else:
+                response = kimi.chat(
+                    messages=generation_prompt(kind, description, list(TOOL_SKILLS)),
+                    tools=[],
+                    model="kimi-k3",
+                    reasoning="high",
+                    task_id=uuid.uuid4().hex,
+                )
+                content = response.message.get("content") or ""
+                if isinstance(content, list):
+                    content = "".join(
+                        str(item.get("text") or "") if isinstance(item, dict) else str(item)
+                        for item in content
+                    )
+                draft = parse_generated_skill(kind, str(content), list(TOOL_SKILLS))
+            draft["toolSummary"] = "、".join(draft.get("required_tools", [])) or "无需既有工具"
+            draft["permissionSummary"] = "、".join(draft.get("permissions", [])) or "无额外权限"
+            self._skillDraftReady.emit(draft)
+        except Exception as exc:
+            self._skillGenerationFailed.emit(str(exc))
+
+    @Slot(str, str)
+    def generateSkill(self, kind: str, description: str) -> None:
+        kind = kind.strip().lower()
+        description = description.strip()
+        if self._skill_generator_busy:
+            return
+        if kind not in {"workflow", "code"}:
+            self._skill_generator_status = "请选择组合技能或代码技能。"
+            self.skillGeneratorChanged.emit()
+            return
+        if len(description) < 6:
+            self._skill_generator_status = "请更具体地描述想生成的技能。"
+            self.skillGeneratorChanged.emit()
+            return
+        self._generated_skill_draft = {}
+        self._skill_generator_busy = True
+        self._skill_generator_kind = kind
+        self._skill_generator_status = (
+            "Kimi K3 harness 正在生成并校验代码技能…"
+            if kind == "code"
+            else "Kimi K3 正在设计组合技能…"
+        )
+        self.skillGeneratorChanged.emit()
+        self._executor.submit(self._generate_skill_worker, kind, description)
+
+    @Slot(object)
+    def _finish_skill_generation(self, draft: object) -> None:
+        self._generated_skill_draft = dict(draft) if isinstance(draft, dict) else {}
+        self._skill_generator_busy = False
+        self._skill_generator_status = (
+            "代码草案已通过 harness 校验，请检查后确认保存。"
+            if self._generated_skill_draft.get("kind") == "code"
+            else "组合技能草案已生成，请检查后确认保存。"
+        )
+        self.skillGeneratorChanged.emit()
+
+    @Slot(str)
+    def _fail_skill_generation(self, message: str) -> None:
+        self._skill_generator_busy = False
+        source = "Kimi K3 harness" if self._skill_generator_kind == "code" else "Kimi K3"
+        self._skill_generator_status = f"{source} 生成失败：{message}"
+        self.skillGeneratorChanged.emit()
+
+    @Slot()
+    def saveGeneratedSkillDraft(self) -> None:
+        if not self._generated_skill_draft:
+            return
+        saved = self._generated_skill_store.save_draft(self._generated_skill_draft)
+        self._generated_skill_draft = {}
+        self._skill_generator_status = f"已保存技能：{saved['name']}"
+        self.skillGeneratorChanged.emit()
+        self.skillsChanged.emit()
+
+    @Slot()
+    def discardGeneratedSkillDraft(self) -> None:
+        self._generated_skill_draft = {}
+        self._skill_generator_status = "已放弃当前草案。"
+        self.skillGeneratorChanged.emit()
+
+    @Slot(str)
+    def deleteGeneratedSkill(self, skill_id: str) -> None:
+        if self._generated_skill_store.delete(skill_id):
+            favorites = list(self.config.setdefault("ui", {}).get("favorite_skills", []))
+            if skill_id in favorites:
+                favorites.remove(skill_id)
+                self.config["ui"]["favorite_skills"] = favorites
+                save_local_settings({"ui": {"favorite_skills": favorites}})
+            self._skill_generator_status = "生成技能已删除。"
+            self.skillGeneratorChanged.emit()
+            self.skillsChanged.emit()
 
     def _set_skill_category_status(self, message: str) -> None:
         if self._skill_category_status == message:
@@ -1081,6 +1266,12 @@ class AssistantBridge(QObject):
 
     @Slot(str, str)
     def setSkillCategory(self, skill_id: str, category: str) -> None:
+        if skill_id.startswith("generated-"):
+            if category in self.skillCategories and self._generated_skill_store.set_category(skill_id, category):
+                self._set_skill_category_status("已更新生成技能分类")
+                self.skillsChanged.emit()
+                self.skillGeneratorChanged.emit()
+            return
         state = self._skill_category_state()
         changed, message = state.assign(skill_id, category)
         self._set_skill_category_status(message)

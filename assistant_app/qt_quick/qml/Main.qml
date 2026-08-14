@@ -824,6 +824,8 @@ ApplicationWindow {
                     Item { Layout.fillWidth: true }
                 }
                 Card {
+                    id: historyCard
+                    objectName: "historyCard"
                     Layout.fillWidth: true; Layout.fillHeight: true; radius: 42
                     ColumnLayout {
                         anchors.fill: parent; anchors.margins: 20; spacing: 6
@@ -877,6 +879,9 @@ ApplicationWindow {
                     }
                 }
                 Card {
+                    id: inputCard
+                    objectName: "inputCard"
+                    visible: !creatorToolbar.expanded
                     Layout.fillWidth: true; implicitHeight: 118; radius: 42
                     RowLayout {
                         anchors.fill: parent
@@ -888,6 +893,20 @@ ApplicationWindow {
                         TextArea { id: input; Layout.fillWidth: true; Layout.fillHeight: true; placeholderText: "输入消息，Ctrl + Enter 发送"; wrapMode: TextEdit.Wrap; color: window.textColor; background: Rectangle { color: window.cardColor; radius: 24 } Keys.onPressed: event => { if (event.key === Qt.Key_Return && (event.modifiers & Qt.ControlModifier)) { send(); event.accepted = true } } function send() { const value = text.trim(); if (value !== "" && !assistant.busy) { assistant.submit(value); text = "" } } }
                         BlueButton { implicitWidth: 112; implicitHeight: 44; text: assistant.busy ? "处理中" : "发送"; enabled: !assistant.busy; onClicked: input.send() }
                     }
+                }
+                CreatorToolbar {
+                    id: creatorToolbar
+                    objectName: "creatorToolbar"
+                    assistantBackend: assistant
+                    Layout.fillWidth: true
+                    Layout.topMargin: 8
+                    Layout.preferredHeight: expanded ? Math.min(280, Math.max(190, window.height * 0.35)) : 36
+                    cardColor: window.cardColor
+                    textColor: window.textColor
+                    secondaryText: window.secondaryText
+                    borderColor: window.borderColor
+                    accent: window.accent
+                    Behavior on Layout.preferredHeight { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                 }
             }
         }
