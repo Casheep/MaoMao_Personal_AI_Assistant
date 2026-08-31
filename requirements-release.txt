@@ -4,6 +4,9 @@ scipy>=1.12,<2
 sounddevice>=0.5,<1
 soundfile>=0.13,<1
 vosk>=0.3.45,<0.4
+sherpa-onnx==1.13.6
+sentencepiece>=0.2.1,<0.3
+pypinyin>=0.55,<0.56
 pywin32>=308
 Pillow>=11,<13
 pyautogui>=0.9.54,<1

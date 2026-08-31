@@ -32,6 +32,8 @@ else:
     np = _LazyNumpy()
 
 from .secrets import load_mimo_key, redact_secret
+from .performance import record_timing
+from .wake_detection import SherpaKeywordChecker
 
 
 _CUDA_DLL_HANDLES: list[object] = []
@@ -150,6 +152,8 @@ class ButtonAudioRecorder:
         speech_start_seconds: float = 0.30,
         adaptive_noise_multiplier: float = 2.2,
         adaptive_noise_offset: float = 80.0,
+        spectral_voice_gate: bool = True,
+        spectral_voice_threshold: float = 0.28,
     ) -> None:
         self.sample_rate = sample_rate
         self.channels = channels
@@ -157,6 +161,11 @@ class ButtonAudioRecorder:
         self.speech_start_seconds = max(0.12, speech_start_seconds)
         self.adaptive_noise_multiplier = max(1.2, adaptive_noise_multiplier)
         self.adaptive_noise_offset = max(0.0, adaptive_noise_offset)
+        self.spectral_voice_gate = bool(spectral_voice_gate)
+        self.spectral_voice_threshold = min(
+            0.75,
+            max(0.05, float(spectral_voice_threshold)),
+        )
         self._chunks: list[np.ndarray] = []
         self._stream: Any = None
         self._lock = threading.Lock()
@@ -193,10 +202,16 @@ class ButtonAudioRecorder:
             del time_info, status
             values = indata.astype(np.float32)
             rms = float(np.sqrt(np.mean(values * values) + 1.0))
+            speech_likeness = (
+                self._speech_likeness(values, self.sample_rate)
+                if self.spectral_voice_gate
+                else 1.0
+            )
             self._process_audio_level(
                 rms,
                 max(0.001, frames / float(self.sample_rate)),
                 time.monotonic(),
+                speech_likeness,
             )
             with self._lock:
                 self._chunks.append(indata.copy())
@@ -215,6 +230,7 @@ class ButtonAudioRecorder:
         rms: float,
         frame_seconds: float,
         now: float,
+        speech_likeness: float = 1.0,
     ) -> None:
         """Adaptive onset gate: ignore steady noise and short transient sounds."""
         if not self._speech_started.is_set():
@@ -228,7 +244,10 @@ class ButtonAudioRecorder:
                 self._noise_floor * self.adaptive_noise_multiplier
                 + self.adaptive_noise_offset,
             )
-            if rms >= self._dynamic_threshold:
+            if (
+                rms >= self._dynamic_threshold
+                and speech_likeness >= self.spectral_voice_threshold
+            ):
                 self._candidate_voice_seconds += frame_seconds
                 if self._candidate_voice_seconds >= self.speech_start_seconds:
                     self._speech_started.set()
@@ -266,12 +285,55 @@ class ButtonAudioRecorder:
             self._dynamic_threshold * 0.82,
             adaptive_continuation,
         )
-        if rms >= continuation_threshold:
+        if (
+            rms >= continuation_threshold
+            and speech_likeness >= self.spectral_voice_threshold * 0.65
+        ):
             self._continuation_voice_seconds += frame_seconds
             if self._continuation_voice_seconds >= 0.08:
                 self._last_voice_at = now
         else:
             self._continuation_voice_seconds = 0.0
+
+    @staticmethod
+    def _speech_likeness(samples: np.ndarray, sample_rate: int) -> float:
+        """Estimate speech structure without retaining audio or loading a model."""
+        values = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if values.size < 64:
+            return 1.0
+        values = values - float(np.mean(values))
+        if float(np.sqrt(np.mean(values * values) + 1.0)) < 4.0:
+            return 0.0
+
+        windowed = values * np.hanning(values.size)
+        power = np.abs(np.fft.rfft(windowed)) ** 2
+        frequencies = np.fft.rfftfreq(values.size, 1.0 / max(1, sample_rate))
+        usable = (frequencies >= 70.0) & (frequencies <= min(6000.0, sample_rate / 2.0))
+        voice_band = (frequencies >= 100.0) & (frequencies <= min(4500.0, sample_rate / 2.0))
+        usable_power = power[usable]
+        if usable_power.size == 0:
+            return 0.0
+        total = float(np.sum(usable_power) + 1e-12)
+        band_ratio = float(np.sum(power[voice_band]) / total)
+        flatness = float(
+            np.exp(np.mean(np.log(usable_power + 1e-12)))
+            / (np.mean(usable_power) + 1e-12)
+        )
+        dominant_ratio = float(np.max(usable_power) / total)
+        zero_crossing_rate = float(np.mean(np.signbit(values[1:]) != np.signbit(values[:-1])))
+
+        band_score = float(np.clip((band_ratio - 0.35) / 0.45, 0.0, 1.0))
+        noise_score = float(np.clip((0.60 - flatness) / 0.35, 0.0, 1.0))
+        tone_score = float(np.clip((0.50 - dominant_ratio) / 0.30, 0.0, 1.0))
+        low_crossing_score = float(np.clip((zero_crossing_rate - 0.006) / 0.025, 0.0, 1.0))
+        high_crossing_score = float(np.clip((0.48 - zero_crossing_rate) / 0.18, 0.0, 1.0))
+        return min(
+            band_score,
+            noise_score,
+            tone_score,
+            low_crossing_score,
+            high_crossing_score,
+        )
 
     def wait_for_utterance_end(
         self,
@@ -326,7 +388,7 @@ class ButtonAudioRecorder:
 
 
 class WakeWordListener:
-    """Low-resource CPU wake-word listener backed by a restricted Vosk grammar."""
+    """Low-resource CPU wake chain with Vosk, voice and optional KWS checks."""
 
     def __init__(
         self,
@@ -346,7 +408,7 @@ class WakeWordListener:
         self.block_size = int(config.get("block_size", 4000))
         self.cooldown_seconds = float(config.get("cooldown_seconds", 2.0))
         self.min_confidence = float(config.get("min_confidence", 0.86))
-        self.partial_hits_required = max(1, int(config.get("partial_hits_required", 1)))
+        self.partial_hits_required = max(1, int(config.get("partial_hits_required", 2)))
         self.partial_voice_multiplier = min(
             1.15, max(0.90, float(config.get("partial_voice_multiplier", 1.05)))
         )
@@ -354,10 +416,15 @@ class WakeWordListener:
         self.fragment_voice_multiplier = min(
             1.10, max(0.85, float(config.get("fragment_voice_multiplier", 1.0)))
         )
+        self.allow_fragment_trigger = bool(config.get("allow_fragment_trigger", False))
         self.require_voice_match = bool(config.get("require_voice_match", True))
         template_path = Path(str(config.get("template_path", "voices/wake-templates.npz")))
         self.template_path = template_path if template_path.is_absolute() else project_root / template_path
         self.verifier = WakeVoiceVerifier(self.template_path)
+        self.checker = SherpaKeywordChecker(
+            config.get("checker") if isinstance(config.get("checker"), dict) else {},
+            self.aliases,
+        )
         self.on_wake = on_wake
         self.on_status = on_status
         self._stop = threading.Event()
@@ -369,6 +436,7 @@ class WakeWordListener:
         self._stream_idle.set()
         self._thread: threading.Thread | None = None
         self._last_wake_at = 0.0
+        self.last_detected_phrase = self.keyword
         self._model = None
 
     def start(self) -> None:
@@ -426,8 +494,10 @@ class WakeWordListener:
         self.keyword = values[0]
         self.aliases = list(dict.fromkeys(values))
         self._normalised_aliases = self._normalise_aliases(self.aliases)
+        self.last_detected_phrase = self.keyword
         if clear_enrollment:
             self.verifier.clear()
+        self.checker.update_keywords(self.aliases)
 
     @staticmethod
     def _normalise(value: str) -> str:
@@ -446,7 +516,7 @@ class WakeWordListener:
         normalised = self._normalise(value)
         if self._matches(normalised):
             return True
-        return any(
+        return self.allow_fragment_trigger and any(
             len(alias_value) == 2
             and alias_value[0] == alias_value[1]
             and normalised == alias_value[0]
@@ -485,7 +555,7 @@ class WakeWordListener:
     def _partial_keyword_match(
         self, value: str, hits: int, voice_score: float
     ) -> bool:
-        """Allow one stable partial keyword while retaining speaker verification."""
+        """Require a stable partial keyword while retaining speaker verification."""
         exact = self._matches(value)
         if not exact and not self._keyword_hint(value):
             return False
@@ -503,6 +573,24 @@ class WakeWordListener:
     def _notify(self, status: str) -> None:
         if self.on_status is not None:
             self.on_status(status)
+
+    def _checker_allows(self, audio_bytes: bytes) -> bool:
+        if not self.checker.active:
+            return True
+        result = self.checker.check_pcm16(audio_bytes, self.sample_rate)
+        if not result.available:
+            record_timing(
+                "wake.checker.unavailable",
+                result.elapsed_seconds,
+                success=False,
+            )
+            return self.checker.mode != "enforce"
+        record_timing(
+            "wake.checker.candidate",
+            result.elapsed_seconds,
+            success=result.accepted,
+        )
+        return result.accepted or self.checker.mode == "shadow"
 
     @staticmethod
     def _confirmation_decision(text: str) -> bool | None:
@@ -585,10 +673,13 @@ class WakeWordListener:
             recognizer = KaldiRecognizer(model, self.sample_rate, grammar)
             recognizer.SetWords(True)
             self.verifier.load()
+            checker_ready = self.checker.prepare()
             if not self.capture_enabled:
                 self._notify("唤醒监听已关闭")
             elif self.require_voice_match and not self.verifier.enrolled:
                 self._notify("请先录制唤醒词")
+            elif self.checker.mode == "enforce" and not checker_ready:
+                self._notify("高精度唤醒检查器不可用")
             else:
                 self._notify(f"正在监听“{'、'.join(self.aliases)}”")
         except Exception as exc:
@@ -649,10 +740,14 @@ class WakeWordListener:
                                     partial_hits,
                                     voice_score,
                                 )
+                                and self._checker_allows(bytes(utterance))
                                 and self.capture_enabled
                                 and now - self._last_wake_at >= self.cooldown_seconds
                             ):
                                 self._last_wake_at = now
+                                self.last_detected_phrase = (
+                                    self._normalise(partial_text) or self.keyword
+                                )
                                 self._paused.set()
                                 recognizer.Reset()
                                 self.on_wake()
@@ -666,6 +761,8 @@ class WakeWordListener:
                         wake_matches = self._voice_and_keyword_match(
                             voice_score, text_matches, text_hint
                         )
+                        if wake_matches:
+                            wake_matches = self._checker_allows(bytes(utterance))
                         partial_hits = 0
                         utterance.clear()
                         if (
@@ -674,6 +771,10 @@ class WakeWordListener:
                             and now - self._last_wake_at >= self.cooldown_seconds
                         ):
                             self._last_wake_at = now
+                            self.last_detected_phrase = (
+                                self._normalise(str(result.get("text", "")))
+                                or self.keyword
+                            )
                             self._paused.set()
                             recognizer.Reset()
                             self.on_wake()

@@ -17,7 +17,7 @@ if (Test-Path -LiteralPath $venvPython) {
     }
 } else {
     py -3.12 -c "import sys; raise SystemExit(0 if (3, 12) <= sys.version_info < (3, 14) else 1)"
-    if ($LASTEXITCODE -ne 0) { throw 'MaoMao v0.0.3_beta2 需要 Python 3.12（或兼容的 3.13）。' }
+    if ($LASTEXITCODE -ne 0) { throw 'MaoMao v0.0.3_beta3 需要 Python 3.12（或兼容的 3.13）。' }
     py -3.12 -m venv (Join-Path $projectRoot '.venv')
     & $venvPython -m pip install --upgrade pip
 }

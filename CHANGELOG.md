@@ -2,6 +2,16 @@
 
 All notable changes to MaoMao Personal AI Assistant are recorded here.
 
+## [v0.0.3_beta3] - 2026-08-31
+
+- Split wake handling into Vosk candidate detection, the existing local voice-template check and an independent CPU/INT8 Sherpa-ONNX keyword checker that keeps candidate audio in memory.
+- Added a default shadow mode for the second-stage checker so content-free timing and acceptance diagnostics can be calibrated before it is allowed to veto wake candidates.
+- Required two stable full-keyword partial results by default and disabled single-character fragment triggering for repeated-character wake words.
+- Added verified Lite download and Full package support for the checker model, including SHA-256 validation, data-only extraction and complete-file checks.
+- Displayed and persisted locally handled speech exchanges, including wake acknowledgements and goodbye responses, so spoken user and assistant content follows the same conversation-log contract without extra model calls.
+- Started every session with both sidebars collapsed and distinguished the user sender label with the favorites accent while retaining MaoMao's blue label.
+- Added an in-memory spectral speech gate alongside adaptive RMS detection to reject steady background noise, broadband noise and single-frequency hum before automatic follow-up transcription.
+
 ## [v0.0.3_beta2] - 2026-08-31
 
 - Added a Windows UI Automation fast path that executes explicit clicks and text entry locally only when the foreground window exposes one unique exact control match.

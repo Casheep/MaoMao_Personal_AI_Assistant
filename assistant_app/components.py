@@ -20,6 +20,9 @@ class RuntimeComponent:
     archive_directory: str
     install_directory: str
     required_file: str
+    archive_format: str = "zip"
+    sha256: str = ""
+    included_files: tuple[str, ...] = ()
     required_at_startup: bool = True
     max_download_bytes: int = 100 * 1024 * 1024
     max_extracted_bytes: int = 250 * 1024 * 1024
@@ -30,9 +33,12 @@ class RuntimeComponent:
         ".fst",
         ".ie",
         ".int",
+        ".json",
         ".mat",
         ".mdl",
+        ".onnx",
         ".stats",
+        ".txt",
     )
 
 
@@ -45,6 +51,32 @@ COMPONENTS: tuple[RuntimeComponent, ...] = (
         archive_directory="vosk-model-small-cn-0.22",
         install_directory="engines/vosk/vosk-model-small-cn-0.22",
         required_file="am/final.mdl",
+    ),
+    RuntimeComponent(
+        id="wake-word-checker-model",
+        name="高精度中文唤醒检查模型",
+        description="下载约 32 MB、安装约 5 MB，用于本地二次检查唤醒词，不占用显存。",
+        download_url=(
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/"
+            "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2"
+        ),
+        archive_directory="sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
+        install_directory=(
+            "engines/sherpa-onnx/"
+            "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
+        ),
+        required_file="encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+        archive_format="tar.bz2",
+        sha256="B2F7C89690DC8CE4C6ED6AFEAB7CD800C36AD1421FB6B6302B4A4B194CF7F35F",
+        included_files=(
+            "tokens.txt",
+            "keywords.txt",
+            "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+            "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+            "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+        ),
+        max_download_bytes=40 * 1024 * 1024,
+        max_extracted_bytes=80 * 1024 * 1024,
     ),
 )
 
@@ -74,7 +106,9 @@ def missing_startup_components(root: Path = PROJECT_ROOT) -> list[str]:
 
 def component_installed(component_id: str, root: Path = PROJECT_ROOT) -> bool:
     component = COMPONENTS_BY_ID[component_id]
-    return (root / component.install_directory / component.required_file).is_file()
+    required_files = component.included_files or (component.required_file,)
+    install_root = root / component.install_directory
+    return all((install_root / relative).is_file() for relative in required_files)
 
 
 def extract_component_archive(
@@ -83,11 +117,50 @@ def extract_component_archive(
     component: RuntimeComponent,
 ) -> None:
     """Extract data-only component files with strict path and size checks."""
+    import shutil
     import stat
+    import tarfile
     import zipfile
 
     extracted_root.mkdir()
     extracted_resolved = extracted_root.resolve()
+    selected = set(component.included_files)
+    if component.archive_format == "tar.bz2":
+        with tarfile.open(archive_path, mode="r:bz2") as archive:
+            members = archive.getmembers()
+            if len(members) > 2000:
+                raise RuntimeError("组件压缩包包含过多文件。")
+            if sum(member.size for member in members if member.isfile()) > component.max_extracted_bytes:
+                raise RuntimeError("组件解压后的大小超出限制。")
+            extracted_files: set[str] = set()
+            for member in members:
+                archive_name = Path(member.name.replace("\\", "/"))
+                member_path = (extracted_root / archive_name).resolve()
+                if member_path != extracted_resolved and extracted_resolved not in member_path.parents:
+                    raise RuntimeError("组件压缩包包含不安全路径。")
+                if member.issym() or member.islnk():
+                    raise RuntimeError("组件压缩包不能包含符号链接。")
+                if not member.isfile():
+                    continue
+                if not archive_name.parts or archive_name.parts[0] != component.archive_directory:
+                    raise RuntimeError("组件压缩包结构不正确。")
+                relative = Path(*archive_name.parts[1:]).as_posix()
+                if selected and relative not in selected:
+                    continue
+                if archive_name.suffix.lower() not in component.allowed_extensions:
+                    raise RuntimeError("组件压缩包包含不允许的文件类型。")
+                source = archive.extractfile(member)
+                if source is None:
+                    raise RuntimeError("组件压缩包内容不完整。")
+                member_path.parent.mkdir(parents=True, exist_ok=True)
+                with source, member_path.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                extracted_files.add(relative)
+            if selected and extracted_files != selected:
+                raise RuntimeError("组件压缩包内容不完整。")
+        return
+    if component.archive_format != "zip":
+        raise RuntimeError("不支持的组件压缩格式。")
     with zipfile.ZipFile(archive_path) as archive:
         members = archive.infolist()
         if len(members) > 2000:
@@ -116,6 +189,7 @@ def install_component(
     root: Path = PROJECT_ROOT,
     progress: ProgressCallback | None = None,
 ) -> Path:
+    import hashlib
     import shutil
     import tempfile
     from urllib.request import Request, urlopen
@@ -134,6 +208,7 @@ def install_component(
         temporary_root = Path(temporary)
         archive_path = temporary_root / "component.zip"
         request = Request(component.download_url, headers={"User-Agent": "MaoMao/0.1"})
+        digest = hashlib.sha256()
         with urlopen(request, timeout=90) as response, archive_path.open("wb") as output:
             total = int(response.headers.get("Content-Length") or 0)
             received = 0
@@ -142,11 +217,14 @@ def install_component(
                 if not block:
                     break
                 output.write(block)
+                digest.update(block)
                 received += len(block)
                 if received > component.max_download_bytes:
                     raise RuntimeError("组件下载大小超出限制。")
                 if progress is not None and total:
                     progress(min(95, int(received * 95 / total)))
+        if component.sha256 and digest.hexdigest().upper() != component.sha256.upper():
+            raise RuntimeError("组件下载校验失败。")
 
         extracted_root = temporary_root / "extracted"
         extract_component_archive(archive_path, extracted_root, component)

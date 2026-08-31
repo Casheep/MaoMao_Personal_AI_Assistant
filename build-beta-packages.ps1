@@ -133,7 +133,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $runtimeCache 'pythonw.exe'))) {
     $oldPythonHome = $env:PYTHONHOME
     try {
         $env:PYTHONHOME = $buildingRuntime
-        & (Join-Path $buildingRuntime 'python.exe') -c "import PySide6,httpx,numpy,sounddevice,soundfile,vosk,win32api,pywinauto,pyautogui,pycaw,psutil,PIL; print('portable runtime ok')"
+        & (Join-Path $buildingRuntime 'python.exe') -c "import PySide6,httpx,numpy,sounddevice,soundfile,vosk,sherpa_onnx,sentencepiece,pypinyin,win32api,pywinauto,pyautogui,pycaw,psutil,PIL; print('portable runtime ok')"
         if ($LASTEXITCODE -ne 0) { throw 'Portable runtime import check failed.' }
     } finally {
         $env:PYTHONHOME = $oldPythonHome
@@ -227,6 +227,25 @@ if ($Edition -eq 'full') {
     $voskTarget = Join-Path $stage 'engines\vosk\vosk-model-small-cn-0.22'
     New-Item -ItemType Directory -Path (Split-Path -Parent $voskTarget) -Force | Out-Null
     Copy-Item -LiteralPath $voskSource -Destination $voskTarget -Recurse
+    $checkerName = 'sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01'
+    $checkerSource = Join-Path $projectRoot "engines\sherpa-onnx\$checkerName"
+    $checkerRequired = @(
+        'tokens.txt',
+        'keywords.txt',
+        'encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx',
+        'decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx',
+        'joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx'
+    )
+    foreach ($required in $checkerRequired) {
+        if (-not (Test-Path -LiteralPath (Join-Path $checkerSource $required))) {
+            throw "The full edition requires the high-precision wake checker model: $required"
+        }
+    }
+    $checkerTarget = Join-Path $stage "engines\sherpa-onnx\$checkerName"
+    New-Item -ItemType Directory -Path $checkerTarget -Force | Out-Null
+    foreach ($required in $checkerRequired) {
+        Copy-Item -LiteralPath (Join-Path $checkerSource $required) -Destination $checkerTarget
+    }
 }
 New-Item -ItemType Directory -Path (Join-Path $stage 'data') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $stage 'voices') -Force | Out-Null
@@ -269,7 +288,7 @@ foreach ($textFile in $publicTextFiles) {
 }
 $releaseFiles = Get-ChildItem -LiteralPath $stage -Recurse -File
 $excludedItems = @('publisher keys', 'local memory', 'usage database', 'screenshots', 'voice templates', 'Qwen ASR', 'CosyVoice', 'F5-TTS', 'Xiaomi token')
-if ($Edition -eq 'lite') { $excludedItems += 'Vosk wake-word model' }
+if ($Edition -eq 'lite') { $excludedItems += @('Vosk wake-word model', 'Sherpa high-precision wake checker model') }
 $manifest = [ordered]@{
     name = 'MaoMao beta'
     version = $releaseVersion
@@ -277,7 +296,7 @@ $manifest = [ordered]@{
     created_at = (Get-Date).ToString('o')
     file_count = $releaseFiles.Count
     size_bytes = ($releaseFiles | Measure-Object Length -Sum).Sum
-    bundled_local_model = if ($Edition -eq 'full') { 'Vosk small Chinese wake-word model' } else { 'none' }
+    bundled_local_model = if ($Edition -eq 'full') { 'Vosk small Chinese wake-word model plus Sherpa INT8 checker' } else { 'none' }
     startup_component_policy = if ($Edition -eq 'lite') { 'download-missing' } else { 'bundled' }
     bundled_keys = $false
     excluded = $excludedItems

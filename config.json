@@ -33,7 +33,7 @@
     "max_screenshots_per_task": 8
   },
   "ui": {
-    "skill_sidebar_expanded": true,
+    "skill_sidebar_expanded": false,
     "favorite_sidebar_expanded": false,
     "favorite_skills": [],
     "custom_skill_categories": [],
@@ -87,10 +87,11 @@
     "block_size": 1600,
     "cooldown_seconds": 3.0,
     "min_confidence": 0.75,
-    "partial_hits_required": 1,
+    "partial_hits_required": 2,
     "partial_voice_multiplier": 1.05,
     "fragment_hits_required": 2,
     "fragment_voice_multiplier": 1.0,
+    "allow_fragment_trigger": false,
     "require_voice_match": true,
     "enrollment_samples": 5,
     "template_path": "voices/wake-templates.npz",
@@ -98,9 +99,21 @@
     "speech_start_seconds": 0.3,
     "adaptive_noise_multiplier": 2.2,
     "adaptive_noise_offset": 80.0,
+    "spectral_voice_gate": true,
+    "spectral_voice_threshold": 0.28,
     "silence_seconds": 1.0,
     "no_speech_timeout": 6.0,
-    "max_record_seconds": 30.0
+    "max_record_seconds": 30.0,
+    "checker": {
+      "enabled": true,
+      "mode": "shadow",
+      "model_path": "engines/sherpa-onnx/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
+      "num_threads": 1,
+      "keywords_score": 1.0,
+      "keywords_threshold": 0.3,
+      "max_audio_seconds": 3.0,
+      "trailing_silence_seconds": 0.72
+    }
   },
   "tts": {
     "enabled": true,

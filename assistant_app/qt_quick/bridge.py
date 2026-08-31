@@ -95,7 +95,9 @@ class AssistantBridge(QObject):
         super().__init__()
         self.config = load_config()
         self.config.setdefault("skills", {})
-        self.config.setdefault("ui", {})
+        ui = self.config.setdefault("ui", {})
+        ui["skill_sidebar_expanded"] = False
+        ui["favorite_sidebar_expanded"] = False
         self.session_id = uuid.uuid4().hex
         self._messages: list[dict[str, str]] = []
         self._busy = False
@@ -133,6 +135,8 @@ class AssistantBridge(QObject):
             float(wake.get("speech_start_seconds", 0.30)),
             float(wake.get("adaptive_noise_multiplier", 2.2)),
             float(wake.get("adaptive_noise_offset", 80.0)),
+            bool(wake.get("spectral_voice_gate", True)),
+            float(wake.get("spectral_voice_threshold", 0.28)),
         )
         self._transcriber = SpeechTranscriber(self.config["audio"])
         self._transcriber.set_reconnect_callback(
@@ -432,7 +436,7 @@ class AssistantBridge(QObject):
 
     @Property(bool, notify=uiSettingsChanged)
     def skillSidebarExpanded(self) -> bool:
-        return bool(self.config.get("ui", {}).get("skill_sidebar_expanded", True))
+        return bool(self.config.get("ui", {}).get("skill_sidebar_expanded", False))
 
     @Property(bool, notify=uiSettingsChanged)
     def favoriteSidebarExpanded(self) -> bool:
@@ -456,6 +460,20 @@ class AssistantBridge(QObject):
     def _append_message(self, role: str, text: str, meta: str = "") -> None:
         self._messages.append({"role": role, "text": text, "meta": meta})
         self.messagesChanged.emit()
+
+    def _append_local_exchange(
+        self,
+        user_text: str,
+        assistant_text: str,
+        assistant_meta: str,
+    ) -> None:
+        """Display and persist speech handled locally without a model call."""
+        self._append_message("user", user_text, "语音识别")
+        messages: list[tuple[str, str]] = [("user", user_text)]
+        if assistant_text:
+            self._append_message("assistant", assistant_text, assistant_meta)
+            messages.append(("assistant", assistant_text))
+        self._ui_database.add_messages(self.session_id, messages)
 
     def _ensure_runtime(self):
         if self._runtime is None:
@@ -647,10 +665,10 @@ class AssistantBridge(QObject):
             self._resume_wake()
             return
         if EXIT_PATTERN.match(re.sub(r"\s+", "", text)):
-            self._append_message("user", text, "语音转写")
             self._continuous_session = False
             self._set_status("连续对话已结束")
             goodbye = str(self.config.get("conversation", {}).get("goodbye_text", "拜拜，下次再聊。"))
+            self._append_local_exchange(text, goodbye, "本地结束连续对话")
             self._voice_executor.submit(self._speak_answer, goodbye, "text")
             return
         self._set_status(f"转写完成 · {seconds:.1f} 秒")
@@ -771,13 +789,16 @@ class AssistantBridge(QObject):
         self.pauseAll()
         self._continuous_session = self.continuousEnabled
         self._set_status("已唤醒，正在听…")
-        self._voice_executor.submit(self._wake_and_record)
+        responses = self.config.get("wake_word", {}).get("response_texts", ["我在呢。"])
+        response = random.choice(list(responses)) if self.ttsEnabled and responses else ""
+        phrase = self._wake_listener.last_detected_phrase or self._wake_listener.keyword
+        self._append_local_exchange(phrase, response, "本地唤醒回应")
+        self._voice_executor.submit(self._wake_and_record, response)
 
-    def _wake_and_record(self) -> None:
+    def _wake_and_record(self, response: str) -> None:
         try:
-            responses = self.config.get("wake_word", {}).get("response_texts", ["我在呢。"])
-            if self.ttsEnabled and responses:
-                self._tts.speak(random.choice(list(responses)))
+            if response:
+                self._tts.speak(response)
         except Exception:
             pass
         self._continuous_recording_worker()

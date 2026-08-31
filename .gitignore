@@ -6,6 +6,7 @@ engines/.cache/
 engines/CosyVoice/
 engines/F5-TTS/
 engines/vosk/
+engines/sherpa-onnx/
 voices/generated-goodbyes/
 voices/wake-templates.npz
 voices/*.wav

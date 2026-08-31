@@ -837,7 +837,7 @@ ApplicationWindow {
                             delegate: ColumnLayout {
                                 required property var modelData
                                 width: chatView.width; spacing: 3
-                                Label { text: modelData.role === "user" ? "你" : (modelData.role === "assistant" ? "猫猫" : "系统"); font.pixelSize: 13; font.bold: modelData.role !== "system"; color: modelData.role === "system" ? window.secondaryText : window.accent }
+                                Label { text: modelData.role === "user" ? "你" : (modelData.role === "assistant" ? "猫猫" : "系统"); font.pixelSize: 13; font.bold: modelData.role !== "system"; color: modelData.role === "user" ? "#A66300" : (modelData.role === "assistant" ? window.accent : window.secondaryText) }
                                 Label { Layout.fillWidth: true; text: modelData.text; wrapMode: Text.Wrap; font.pixelSize: 13; color: window.textColor }
                                 Label { visible: modelData.meta !== ""; text: modelData.meta; font.pixelSize: 11; color: "#8E8E93" }
                             }

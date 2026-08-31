@@ -74,9 +74,9 @@ class QtQuickMigrationTests(unittest.TestCase):
             bridge.close()
 
     def test_public_pep440_and_windows_versions_use_their_required_formats(self) -> None:
-        self.assertEqual(__version__, "v0.0.3_beta2")
+        self.assertEqual(__version__, "v0.0.3_beta3")
         project = Path("pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.0.3b2"', project)
+        self.assertIn('version = "0.0.3b3"', project)
         launcher = Path("launcher/MaoMaoLauncher.cs").read_text(encoding="utf-8")
         self.assertIn('AssemblyVersion("0.0.3.0")', launcher)
         self.assertIn('AssemblyFileVersion("0.0.3.0")', launcher)
@@ -163,6 +163,71 @@ class QtQuickMigrationTests(unittest.TestCase):
             self.assertNotIn(
                 'self._transcriptionFailed.emit("等待后续语音超时")',
                 source,
+            )
+        finally:
+            bridge.close()
+
+    def test_voice_goodbye_is_displayed_and_saved_as_a_complete_exchange(self) -> None:
+        bridge = AssistantBridge()
+        try:
+            bridge._continuous_session = True
+            goodbye = bridge.config["conversation"]["goodbye_text"]
+            with (
+                patch.object(bridge._ui_database, "add_messages") as add_messages,
+                patch.object(bridge._voice_executor, "submit") as submit,
+            ):
+                bridge._finish_transcription("拜拜啦", 0.8)
+            self.assertEqual(
+                bridge.messages[-2:],
+                [
+                    {"role": "user", "text": "拜拜啦", "meta": "语音识别"},
+                    {
+                        "role": "assistant",
+                        "text": goodbye,
+                        "meta": "本地结束连续对话",
+                    },
+                ],
+            )
+            add_messages.assert_called_once_with(
+                bridge.session_id,
+                [("user", "拜拜啦"), ("assistant", goodbye)],
+            )
+            submit.assert_called_once_with(bridge._speak_answer, goodbye, "text")
+            self.assertFalse(bridge._continuous_session)
+            self.assertEqual(bridge.status, "连续对话已结束")
+        finally:
+            bridge.close()
+
+    def test_spoken_wake_exchange_is_displayed_and_saved(self) -> None:
+        bridge = AssistantBridge()
+        try:
+            bridge._wake_enabled = True
+            bridge.config.setdefault("tts", {})["enabled"] = True
+            bridge.config.setdefault("wake_word", {})["response_texts"] = ["我在呢。"]
+            bridge._wake_listener.last_detected_phrase = "猫猫"
+            with (
+                patch.object(bridge._ui_database, "add_messages") as add_messages,
+                patch.object(bridge._voice_executor, "submit") as submit,
+            ):
+                bridge._handle_wake()
+            self.assertEqual(
+                bridge.messages[-2:],
+                [
+                    {"role": "user", "text": "猫猫", "meta": "语音识别"},
+                    {
+                        "role": "assistant",
+                        "text": "我在呢。",
+                        "meta": "本地唤醒回应",
+                    },
+                ],
+            )
+            add_messages.assert_called_once_with(
+                bridge.session_id,
+                [("user", "猫猫"), ("assistant", "我在呢。")],
+            )
+            self.assertEqual(
+                submit.call_args_list[-1].args,
+                (bridge._wake_and_record, "我在呢。"),
             )
         finally:
             bridge.close()
@@ -272,7 +337,7 @@ class QtQuickMigrationTests(unittest.TestCase):
         source = Path("assistant_app/qt_quick/bridge.py").read_text(encoding="utf-8")
         wake_handler = source[source.index("def _handle_wake"):source.index("def _wake_and_record")]
         self.assertNotIn("showWindowRequested.emit()", wake_handler)
-        self.assertIn("self._voice_executor.submit(self._wake_and_record)", wake_handler)
+        self.assertIn("self._voice_executor.submit(self._wake_and_record, response)", wake_handler)
 
     def test_qt_shell_preserves_the_previous_three_column_layout(self) -> None:
         qml = Path("assistant_app/qt_quick/qml/Main.qml").read_text(encoding="utf-8")
@@ -292,9 +357,30 @@ class QtQuickMigrationTests(unittest.TestCase):
         self.assertIn('住在你电脑里的语音助手喵~', qml)
         self.assertNotIn('model: ["设置", "权限", "定时任务", "关于"]', qml)
         self.assertIn(
-            'color: modelData.role === "system" ? window.secondaryText : window.accent',
+            'color: modelData.role === "user" ? "#A66300"',
             qml,
         )
+
+    def test_every_sidebar_starts_collapsed(self) -> None:
+        with patch(
+            "assistant_app.qt_quick.bridge.load_config",
+            return_value={
+                "ui": {
+                    "skill_sidebar_expanded": True,
+                    "favorite_sidebar_expanded": True,
+                },
+                "skills": {},
+                "audio": {"sample_rate": 16000, "channels": 1},
+                "wake_word": {"enabled": False},
+                "tts": {"enabled": False},
+            },
+        ):
+            bridge = AssistantBridge()
+        try:
+            self.assertFalse(bridge.skillSidebarExpanded)
+            self.assertFalse(bridge.favoriteSidebarExpanded)
+        finally:
+            bridge.close()
 
     def test_bridge_persists_sidebar_visibility(self) -> None:
         bridge = AssistantBridge()

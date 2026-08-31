@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import io
+import tarfile
 import tempfile
 import threading
 import unittest
@@ -73,10 +75,21 @@ class LearnedActionsAndPermissionTests(unittest.TestCase):
                 json.dumps({"edition": "lite"}), encoding="utf-8"
             )
             self.assertEqual(distribution_edition(root), "lite")
-            self.assertEqual(missing_startup_components(root), ["wake-word-model"])
+            self.assertEqual(
+                missing_startup_components(root),
+                ["wake-word-model", "wake-word-checker-model"],
+            )
             model = root / "engines/vosk/vosk-model-small-cn-0.22/am/final.mdl"
             model.parent.mkdir(parents=True)
             model.write_bytes(b"model")
+            checker_root = (
+                root
+                / "engines/sherpa-onnx"
+                / "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
+            )
+            checker_root.mkdir(parents=True)
+            for relative in COMPONENTS[1].included_files:
+                (checker_root / relative).write_bytes(b"model")
             self.assertEqual(missing_startup_components(root), [])
 
     def test_full_edition_never_downloads_startup_components(self) -> None:
@@ -95,6 +108,27 @@ class LearnedActionsAndPermissionTests(unittest.TestCase):
                 archive.writestr("vosk-model-small-cn-0.22/payload.exe", b"not executable")
             with self.assertRaisesRegex(RuntimeError, "不允许的文件类型"):
                 extract_component_archive(archive_path, root / "extracted", COMPONENTS[0])
+
+    def test_checker_archive_extracts_only_the_required_model_files(self) -> None:
+        component = COMPONENTS[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "checker.tar.bz2"
+            with tarfile.open(archive_path, "w:bz2") as archive:
+                for relative in (*component.included_files, "README.md"):
+                    payload = relative.encode("utf-8")
+                    info = tarfile.TarInfo(
+                        f"{component.archive_directory}/{relative}"
+                    )
+                    info.size = len(payload)
+                    archive.addfile(info, io.BytesIO(payload))
+            extracted = root / "extracted"
+            extract_component_archive(archive_path, extracted, component)
+            model_root = extracted / component.archive_directory
+            self.assertTrue(
+                all((model_root / relative).is_file() for relative in component.included_files)
+            )
+            self.assertFalse((model_root / "README.md").exists())
 
     def test_empty_public_key_file_is_valid_but_unconfigured(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -679,7 +713,7 @@ class TTSConfigurationTests(unittest.TestCase):
         self.assertFalse(listener._matches("请叫猫猫过来"))
         self.assertFalse(listener._matches("喵喵"))
         self.assertFalse(listener._matches("你好"))
-        self.assertTrue(listener._keyword_hint("猫"))
+        self.assertFalse(listener._keyword_hint("猫"))
         self.assertFalse(listener._keyword_hint("喵"))
         self.assertEqual(listener._grammar_phrases(), ["猫猫", "猫 猫"])
 
@@ -746,6 +780,7 @@ class TTSConfigurationTests(unittest.TestCase):
                 "require_voice_match": True,
                 "fragment_hits_required": 2,
                 "fragment_voice_multiplier": 1.0,
+                "allow_fragment_trigger": True,
             },
             on_wake=lambda: None,
         )
@@ -2195,6 +2230,41 @@ class StorageAndBudgetTests(unittest.TestCase):
 
         self.assertLess(settled_at, 1.5)
         self.assertEqual(recorder._last_voice_at, settled_at)
+
+    def test_spectral_voice_gate_rejects_loud_non_speech_activity(self) -> None:
+        recorder = ButtonAudioRecorder(
+            sample_rate=16000,
+            channels=1,
+            silence_threshold=500.0,
+            speech_start_seconds=0.30,
+            spectral_voice_threshold=0.28,
+        )
+        for index in range(8):
+            recorder._process_audio_level(
+                1800.0,
+                0.10,
+                0.10 + index * 0.10,
+                speech_likeness=0.12,
+            )
+        self.assertFalse(recorder._speech_started.is_set())
+        for index in range(3):
+            recorder._process_audio_level(
+                1800.0,
+                0.10,
+                1.00 + index * 0.10,
+                speech_likeness=0.72,
+            )
+        self.assertTrue(recorder._speech_started.is_set())
+
+    def test_spectral_voice_features_reject_white_noise_and_single_tone(self) -> None:
+        generator = np.random.default_rng(42)
+        white_noise = generator.normal(0.0, 1800.0, 1600).astype(np.float32)
+        timeline = np.arange(1600, dtype=np.float32) / 16000.0
+        single_tone = (1800.0 * np.sin(2.0 * np.pi * 440.0 * timeline)).astype(
+            np.float32
+        )
+        self.assertLess(ButtonAudioRecorder._speech_likeness(white_noise, 16000), 0.28)
+        self.assertLess(ButtonAudioRecorder._speech_likeness(single_tone, 16000), 0.28)
 
 
     def test_voice_clip_rejects_silence_but_accepts_quiet_audio(self) -> None:
