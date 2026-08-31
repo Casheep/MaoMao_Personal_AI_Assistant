@@ -9,3 +9,4 @@ class ToolResult:
     success: bool
     content: str
     image_path: Path | None = None
+    image_prompt: str = ""

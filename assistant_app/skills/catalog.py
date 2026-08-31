@@ -28,9 +28,15 @@ SKILL_CATALOG: tuple[SkillDefinition, ...] = (
         ("open_url", "ask_chatgpt"),
     ),
     SkillDefinition("web-research", "网页搜索", "搜索网页、打开搜索结果并读取其中的正文信息。", "电脑与浏览器", ("search_web", "open_search_result")),
-    SkillDefinition("screen-inspection", "屏幕观察", "读取当前屏幕内容，让猫猫理解正在显示的界面。", "屏幕与视觉", ("inspect_screen",)),
+    SkillDefinition(
+        "screen-inspection",
+        "屏幕观察",
+        "优先读取当前窗口的结构化控件，并使用自适应概览与按需高清局部理解界面。",
+        "屏幕与视觉",
+        ("inspect_screen", "inspect_screen_region"),
+    ),
     SkillDefinition("screenshot-retention", "截图保存", "在你明确要求时把当前屏幕截图长期保存在本机。", "屏幕与视觉", ("save_screenshot",)),
-    SkillDefinition("screen-control", "屏幕操作", "在获得确认后点击界面或向当前窗口输入文字。", "屏幕与视觉", ("click_screen", "type_text")),
+    SkillDefinition("screen-control", "屏幕操作", "在获得确认后优先按控件名称点击或输入，必要时使用屏幕坐标。", "屏幕与视觉", ("click_screen", "type_text")),
     SkillDefinition(
         "visual-action-shortcuts",
         "常用动作学习",
@@ -61,7 +67,7 @@ SKILL_CATALOG: tuple[SkillDefinition, ...] = (
     SkillDefinition(
         "scheduled-tasks",
         "定时任务",
-        "按本机时间自动执行一次性或每日任务，也可以全程静默运行。",
+        "按本机时间执行一次性或每日任务；未运行期间错过的时间不会补跑。",
         "设备与自动化",
         ("create_scheduled_task", "list_scheduled_tasks", "cancel_scheduled_task"),
     ),

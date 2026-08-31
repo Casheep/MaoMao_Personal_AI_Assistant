@@ -108,6 +108,7 @@
     "preload_on_startup": true,
     "backend": "mimo-api",
     "leading_silence_ms": 220,
+    "first_playback_silence_ms": 800,
     "trailing_silence_ms": 180,
     "mimo_voice": "冰糖",
     "mimo_style": "自然、亲切、简洁，像熟悉的朋友一样说话。",

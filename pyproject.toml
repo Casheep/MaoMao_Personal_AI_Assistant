@@ -1,6 +1,6 @@
 [project]
 name = "MaoMao_Personal_AI_Assistant"
-version = "0.0.3b1"
+version = "0.0.3b2"
 description = "A private, local-first Windows voice assistant."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"

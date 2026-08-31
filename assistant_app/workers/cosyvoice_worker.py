@@ -11,6 +11,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from .audio_output import speaker_preroll_ms
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENGINE_ROOT = PROJECT_ROOT / "engines" / "CosyVoice"
@@ -171,7 +173,7 @@ class CosyVoiceWorker:
             # phoneme is not swallowed when a fresh stream starts.
             leading_frames = max(
                 0,
-                round(sample_rate * int(request.get("leading_silence_ms", 220)) / 1000),
+                round(sample_rate * speaker_preroll_ms(request, self._stream) / 1000),
             )
             if leading_frames:
                 self._enqueue_playback(np.zeros(leading_frames, dtype=np.int16), sample_rate)

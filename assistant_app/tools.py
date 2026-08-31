@@ -23,7 +23,9 @@ from typing import Any, Callable
 
 from .config import AppPaths, load_config, save_local_setting
 from .database import Database
-from .performance import timed
+from .performance import record_timing, timed
+from .screen_capture import AdaptiveScreenSession, PreparedScreen
+from .screen_context import UIAMatch, WindowsUIAFastPath, screen_visual_plan
 from .skills import TOOL_SKILLS, is_skill_enabled
 from .tool_handlers import LocalToolHandlers
 from .tool_types import ToolResult
@@ -115,9 +117,13 @@ class ToolRegistry(LocalToolHandlers):
         self._research_browser_active = False
         self._temporary_screenshots: set[Path] = set()
         self._last_screenshot: Path | None = None
+        self._active_tool_task_id = ""
         self._schemas_cache_key: tuple[tuple[str, bool], ...] | None = None
         self._schemas_cache: tuple[dict[str, Any], ...] = ()
-        (self.paths.screenshots / "temporary").mkdir(parents=True, exist_ok=True)
+        self._fast_screen = WindowsUIAFastPath()
+        self._screen_session = AdaptiveScreenSession(
+            self.paths.screenshots / "temporary"
+        )
         (self.paths.screenshots / "saved").mkdir(parents=True, exist_ok=True)
         self._cleanup_stale_screenshots()
         self.safe_roots = [
@@ -346,7 +352,29 @@ class ToolRegistry(LocalToolHandlers):
                 {"path": {"type": "string"}},
                 ["path"],
             ),
-            self._schema("inspect_screen", "截取当前屏幕并交给模型观察", {}, []),
+            self._schema(
+                "inspect_screen",
+                "截取当前屏幕并交给模型观察；普通识别使用 overview，只有小字、OCR、图表或精确视觉任务才使用 detail",
+                {
+                    "profile": {
+                        "type": "string",
+                        "enum": ["overview", "balanced", "detail"],
+                        "description": "概览、均衡或精细分辨率；默认 balanced",
+                    }
+                },
+                [],
+            ),
+            self._schema(
+                "inspect_screen_region",
+                "当已有概览仍看不清时，仅放大概览图中的目标区域；坐标使用概览图像素，不要无条件切分整屏",
+                {
+                    "left": {"type": "integer"},
+                    "top": {"type": "integer"},
+                    "right": {"type": "integer"},
+                    "bottom": {"type": "integer"},
+                },
+                ["left", "top", "right", "bottom"],
+            ),
             self._schema(
                 "click_screen",
                 "在屏幕坐标处单击；执行前必须让用户确认",
@@ -424,7 +452,12 @@ class ToolRegistry(LocalToolHandlers):
             if handler is None:
                 result = ToolResult(False, f"未知工具：{name}")
             else:
-                result = handler(arguments)
+                previous_task_id = self._active_tool_task_id
+                self._active_tool_task_id = task_id
+                try:
+                    result = handler(arguments)
+                finally:
+                    self._active_tool_task_id = previous_task_id
         except Exception as exc:  # tool failures must be returned to the model
             result = ToolResult(False, f"工具执行失败：{type(exc).__name__}: {exc}")
         self.database.log_action(
@@ -1276,6 +1309,85 @@ class ToolRegistry(LocalToolHandlers):
                 best = (score, item)
         return best[1] if best is not None else None
 
+    def match_fast_screen_action(self, text: str) -> UIAMatch | None:
+        """Match an explicit command against one unique foreground UIA control."""
+        if not is_skill_enabled(self.skills_config, "screen-inspection"):
+            return None
+        if not is_skill_enabled(self.skills_config, "screen-control"):
+            return None
+        return self._fast_screen.match(text)
+
+    def screen_context_for(self, text: str, *, allow_actions: bool = True) -> str:
+        """Return a bounded, transient UIA description for an imminent model call."""
+        if not is_skill_enabled(self.skills_config, "screen-inspection"):
+            return ""
+        return self._fast_screen.context_for(
+            text,
+            allow_actions=(
+                allow_actions
+                and is_skill_enabled(self.skills_config, "screen-control")
+            ),
+        )
+
+    def prepare_screen_prompt(self, text: str, task_id: str) -> ToolResult:
+        """Capture one task-adaptive overview before the first visual model request."""
+        plan = screen_visual_plan(text)
+        return self.execute("inspect_screen", {"profile": plan.profile}, task_id)
+
+    def execute_fast_screen_action(
+        self,
+        match: UIAMatch,
+        task_id: str,
+    ) -> ToolResult:
+        """Confirm and execute a previously matched foreground UIA control."""
+        tool_name = "type_text" if match.command.action == "set_value" else "click_screen"
+        label = match.element.name or match.element.automation_id or match.command.target
+        app_name, window_title = self._window_context(match.snapshot.handle)
+        x, y = match.element.center
+        arguments: dict[str, Any] = {
+            "description": (
+                f"向“{label}”输入文字"
+                if match.command.action == "set_value"
+                else f"点击“{label}”"
+            ),
+            "_target_app": app_name,
+            "_target_window": window_title or match.snapshot.title,
+            "_uia_control_type": match.element.control_type,
+        }
+        if match.command.action == "set_value":
+            arguments["text"] = match.command.value
+        else:
+            arguments["x"] = x
+            arguments["y"] = y
+
+        if not self.confirmation_callback(tool_name, arguments):
+            result = ToolResult(False, "用户取消了界面操作。")
+        else:
+            try:
+                self._fast_screen.execute(match)
+                result = ToolResult(
+                    True,
+                    (
+                        f"已通过 Windows UI Automation 向“{label}”输入文字。"
+                        if match.command.action == "set_value"
+                        else f"已通过 Windows UI Automation 点击“{label}”。"
+                    ),
+                )
+            except Exception:
+                result = ToolResult(
+                    False,
+                    "Windows UI Automation 无法执行这个控件，改用屏幕识别。",
+                )
+        self.database.log_action(
+            self.session_id,
+            task_id,
+            tool_name,
+            arguments,
+            result.success,
+            result.content,
+        )
+        return result
+
     @staticmethod
     def _read_web_page(url: str) -> str:
         request = Request(url, headers={"User-Agent": "Mozilla/5.0 MaoMao/1.0"})
@@ -1920,30 +2032,51 @@ class ToolRegistry(LocalToolHandlers):
 
 
 
-    def _tool_inspect_screen(self, _: dict[str, Any]) -> ToolResult:
-        from PIL import ImageGrab
+    def _screen_artifact_result(self, artifact: PreparedScreen) -> ToolResult:
+        self._temporary_screenshots.add(artifact.path)
+        self._last_screenshot = artifact.path
+        return ToolResult(
+            True,
+            artifact.content,
+            image_path=artifact.path,
+            image_prompt=artifact.prompt,
+        )
 
-        filename = datetime.now().strftime("screen-%Y%m%d-%H%M%S-%f.png")
-        path = self.paths.screenshots / "temporary" / filename
-        image = ImageGrab.grab(all_screens=True)
-        image.thumbnail((1600, 1600))
-        image.save(path, format="PNG", optimize=True)
-        self._temporary_screenshots.add(path)
-        self._last_screenshot = path
-        return ToolResult(True, "已截取当前屏幕，图片附在下一条消息中。", image_path=path)
+    def _tool_inspect_screen(self, arguments: dict[str, Any]) -> ToolResult:
+        artifact = self._screen_session.capture(
+            str(arguments.get("profile") or "balanced"),
+            self._active_tool_task_id,
+        )
+        return self._screen_artifact_result(artifact)
+
+    def _tool_inspect_screen_region(self, arguments: dict[str, Any]) -> ToolResult:
+        try:
+            artifact = self._screen_session.zoom(
+                left=int(arguments.get("left", 0)),
+                top=int(arguments.get("top", 0)),
+                right=int(arguments.get("right", 0)),
+                bottom=int(arguments.get("bottom", 0)),
+                task_id=self._active_tool_task_id,
+            )
+        except (LookupError, ValueError) as exc:
+            return ToolResult(False, str(exc))
+        return self._screen_artifact_result(artifact)
 
     def _tool_save_screenshot(self, _: dict[str, Any]) -> ToolResult:
         from PIL import ImageGrab
 
         saved_dir = self.paths.screenshots / "saved"
         saved_dir.mkdir(parents=True, exist_ok=True)
-        filename = datetime.now().strftime("saved-%Y%m%d-%H%M%S-%f.png")
-        destination = saved_dir / filename
         source = self._last_screenshot
         if source is not None and source.is_file() and source in self._temporary_screenshots:
+            suffix = source.suffix.lower() if source.suffix else ".jpg"
+            filename = datetime.now().strftime(f"saved-%Y%m%d-%H%M%S-%f{suffix}")
+            destination = saved_dir / filename
             source.replace(destination)
             self._temporary_screenshots.discard(source)
         else:
+            filename = datetime.now().strftime("saved-%Y%m%d-%H%M%S-%f.png")
+            destination = saved_dir / filename
             image = ImageGrab.grab(all_screens=True)
             image.save(destination, format="PNG", optimize=True)
         self._last_screenshot = destination
@@ -1958,12 +2091,15 @@ class ToolRegistry(LocalToolHandlers):
             self._temporary_screenshots.discard(path)
         if self._last_screenshot is not None and not self._last_screenshot.exists():
             self._last_screenshot = None
+        self._screen_session.clear()
 
     def _cleanup_stale_screenshots(self, max_age_hours: float = 24.0) -> None:
         cutoff = time.time() - max(1.0, max_age_hours) * 3600.0
         candidates = list(self.paths.screenshots.glob("screen-*.png"))
+        candidates.extend(self.paths.screenshots.glob("screen-*.jpg"))
         temporary = self.paths.screenshots / "temporary"
         candidates.extend(temporary.glob("screen-*.png"))
+        candidates.extend(temporary.glob("screen-*.jpg"))
         for path in candidates:
             try:
                 if path.stat().st_mtime < cutoff:
@@ -2070,12 +2206,26 @@ class ToolRegistry(LocalToolHandlers):
         return ToolResult(True, f"已输入 {len(text)} 个字符。")
 
 
-def image_message(path: Path) -> dict[str, Any]:
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+def image_message(path: Path, prompt: str = "") -> dict[str, Any]:
+    started = time.perf_counter()
+    success = False
+    try:
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        success = True
+    finally:
+        record_timing(
+            "screen.image_encode",
+            time.perf_counter() - started,
+            success=success,
+        )
+    mime_type = "image/jpeg" if path.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
     return {
         "role": "user",
         "content": [
-            {"type": "text", "text": "这是刚刚通过 inspect_screen 获取的当前屏幕。请根据图像继续任务。"},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}},
+            {
+                "type": "text",
+                "text": prompt or "这是刚刚通过 inspect_screen 获取的当前屏幕。请根据图像继续任务。",
+            },
+            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}},
         ],
     }

@@ -403,6 +403,53 @@ class Database:
             """,
         )
 
+    def expire_missed_scheduled_tasks(
+        self,
+        now: str | datetime | None = None,
+    ) -> int:
+        """Skip enabled occurrences that became due before the current app session."""
+        current = self._local_schedule_time(now or datetime.now())
+        current_text = current.isoformat(timespec="seconds")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.connection.execute(
+                """
+                SELECT id, next_run_at, repeat_rule
+                FROM scheduled_tasks
+                WHERE enabled = 1 AND next_run_at <= ?
+                """,
+                (current_text,),
+            ).fetchall()
+            updated_at = utc_now()
+            for row in rows:
+                scheduled = self._local_schedule_time(str(row["next_run_at"]))
+                repeat_rule = str(row["repeat_rule"])
+                enabled = 0
+                next_run = scheduled
+                if repeat_rule == "daily":
+                    enabled = 1
+                    while next_run <= current:
+                        next_run += timedelta(days=1)
+                self.connection.execute(
+                    """
+                    UPDATE scheduled_tasks
+                    SET enabled = ?, next_run_at = ?, last_status = 'missed',
+                        last_result = '计划时间内猫猫未运行，本次已跳过。', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        enabled,
+                        next_run.isoformat(timespec="seconds"),
+                        updated_at,
+                        int(row["id"]),
+                    ),
+                )
+            self._commit()
+            return len(rows)
+        except Exception:
+            self.connection.rollback()
+            raise
+
     def due_scheduled_tasks(
         self,
         now: str | datetime | None = None,

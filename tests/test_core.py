@@ -26,6 +26,7 @@ from assistant_app.audio import (
     play_wav_file,
 )
 from assistant_app.tts import SpeechSynthesizer
+from assistant_app.workers.audio_output import speaker_preroll_ms
 from assistant_app.workers.tts_worker import AlternateTTSWorker
 from assistant_app.workers.cosyvoice_worker import CosyVoiceWorker
 from assistant_app.config import AppPaths, load_config, save_local_settings
@@ -412,7 +413,58 @@ class TTSConfigurationTests(unittest.TestCase):
         self.assertEqual(request["backend"], "f5tts")
         self.assertEqual(request["f5_nfe_steps"], 24)
         self.assertEqual(request["leading_silence_ms"], 220)
+        self.assertEqual(request["first_playback_silence_ms"], 800)
         self.assertEqual(request["trailing_silence_ms"], 180)
+
+    def test_fresh_output_stream_gets_a_longer_speaker_preroll(self) -> None:
+        request = {
+            "leading_silence_ms": 220,
+            "first_playback_silence_ms": 800,
+        }
+        self.assertEqual(speaker_preroll_ms(request, None), 800)
+        self.assertEqual(
+            speaker_preroll_ms(request, SimpleNamespace(active=False)),
+            800,
+        )
+        self.assertEqual(
+            speaker_preroll_ms(request, SimpleNamespace(active=True)),
+            220,
+        )
+
+    def test_mimo_worker_only_uses_long_preroll_for_a_fresh_stream(self) -> None:
+        worker = AlternateTTSWorker()
+        worker.backend = "mimo-api"
+        request = {
+            "backend": "mimo-api",
+            "leading_silence_ms": 220,
+            "first_playback_silence_ms": 800,
+            "trailing_silence_ms": 180,
+        }
+        enqueued_lengths: list[int] = []
+
+        def enqueue(audio, sample_rate: int) -> None:
+            enqueued_lengths.append(len(audio))
+            worker._stream = SimpleNamespace(active=True)
+            worker._sample_rate = sample_rate
+
+        with (
+            patch.object(worker, "_load"),
+            patch.object(
+                worker,
+                "_mimo_generate",
+                return_value=(iter([np.ones(240, dtype=np.int16)]), 24000),
+            ),
+            patch.object(worker, "_enqueue_playback", side_effect=enqueue),
+            patch.object(worker, "_wait_for_playback"),
+        ):
+            worker._generate(request, play=True)
+            first_preroll = enqueued_lengths[0]
+            enqueued_lengths.clear()
+            worker._generate(request, play=True)
+            second_preroll = enqueued_lengths[0]
+
+        self.assertEqual(first_preroll, 24 * 800)
+        self.assertEqual(second_preroll, 24 * 220)
 
     def test_alternate_synthesis_adds_leading_and_trailing_silence(self) -> None:
         worker = AlternateTTSWorker()
@@ -1009,6 +1061,35 @@ class StorageAndBudgetTests(unittest.TestCase):
         self.assertEqual(stored[daily_id]["last_status"], "succeeded")
         self.assertEqual(stored[daily_id]["last_result"], "操作已完成")
 
+    def test_missed_schedules_are_skipped_instead_of_catching_up(self) -> None:
+        first_run = (datetime.now() + timedelta(minutes=2)).replace(microsecond=0)
+        once_id = self.database.create_scheduled_task(
+            "一次性任务",
+            first_run,
+            repeat_rule="once",
+        )
+        daily_id = self.database.create_scheduled_task(
+            "每日任务",
+            first_run,
+            repeat_rule="daily",
+        )
+        reopened_at = first_run + timedelta(days=1, seconds=1)
+
+        self.assertEqual(
+            self.database.expire_missed_scheduled_tasks(reopened_at),
+            2,
+        )
+        stored = {task["id"]: task for task in self.database.list_scheduled_tasks()}
+        self.assertFalse(stored[once_id]["enabled"])
+        self.assertTrue(stored[daily_id]["enabled"])
+        self.assertEqual(stored[once_id]["last_status"], "missed")
+        self.assertEqual(stored[daily_id]["last_status"], "missed")
+        self.assertEqual(
+            datetime.fromisoformat(stored[daily_id]["next_run_at"]),
+            first_run + timedelta(days=2),
+        )
+        self.assertEqual(self.database.due_scheduled_tasks(reopened_at), [])
+
     def test_create_schedule_tool_confirms_and_persists_silent_mode(self) -> None:
         root = Path(self.temp.name)
         screenshots = root / "screenshots"
@@ -1539,7 +1620,7 @@ class StorageAndBudgetTests(unittest.TestCase):
         self.assertEqual(events[1], "tool:search_web")
         self.assertEqual(events[-1], "browser:closed")
 
-    def test_screenshot_tool_result_upgrades_next_auto_call_to_k3(self) -> None:
+    def test_simple_screenshot_tool_result_stays_on_fast_k2_vision(self) -> None:
         requested_models: list[str] = []
         screenshot = Path(self.temp.name) / "screen.png"
         screenshot.write_bytes(b"fake-png")
@@ -1601,9 +1682,12 @@ class StorageAndBudgetTests(unittest.TestCase):
             "visual-upgrade-test",
         )
         answer = agent.run("帮我看看现在是什么情况")
-        self.assertEqual(requested_models, ["kimi-k2.6", "kimi-k3"])
-        self.assertEqual(answer.route.model, "kimi-k3")
-        self.assertIn("获取图像后自动切换 K3", answer.route.reasons)
+        self.assertEqual(requested_models, ["kimi-k2.6", "kimi-k2.6"])
+        self.assertEqual(answer.route.model, "kimi-k2.6")
+        self.assertIn("快速屏幕概览", answer.route.reasons)
+        timing_names = dict(answer.timings)
+        self.assertIn("model:kimi-k2.6", timing_names)
+        self.assertIn("tools", timing_names)
 
     def test_simple_open_stops_after_success_without_second_model_call(self) -> None:
         class FakeClient:

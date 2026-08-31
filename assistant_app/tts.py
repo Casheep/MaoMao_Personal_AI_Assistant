@@ -169,6 +169,9 @@ class SpeechSynthesizer:
             "prompt_language": self.config.get("prompt_language", "zh"),
             "text_language": self.config.get("text_language", "zh"),
             "leading_silence_ms": int(self.config.get("leading_silence_ms", 220)),
+            "first_playback_silence_ms": int(
+                self.config.get("first_playback_silence_ms", 800)
+            ),
             "trailing_silence_ms": int(self.config.get("trailing_silence_ms", 180)),
             "model_dir": self.config.get(
                 "cosyvoice_model_dir",

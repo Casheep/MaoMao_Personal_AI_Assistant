@@ -116,7 +116,7 @@ class KimiCodeSkillHarness:
             )
         except ImportError as exc:
             raise RuntimeError(
-                "代码技能需要 Python 3.12+ 与 kimi-agent-sdk，请重新安装 v0.0.3_beta1 依赖。"
+                "代码技能需要 Python 3.12+ 与 kimi-agent-sdk，请重新安装 v0.0.3_beta2 依赖。"
             ) from exc
 
         config = Config(

@@ -77,6 +77,7 @@ class LocalToolHandlers:
             "succeeded": "上次成功",
             "failed": "上次失败",
             "cancelled": "已取消",
+            "missed": "已错过",
         }
         lines = []
         for task in tasks:

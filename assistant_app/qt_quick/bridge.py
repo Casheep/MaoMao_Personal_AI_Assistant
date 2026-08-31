@@ -43,7 +43,11 @@ ASR_MODES = {"mimo-api": "API · MiMo-V2.5-ASR"}
 HIGH_RISK_PATTERN = re.compile(
     r"删除|付款|支付|购买|下单|发送消息|提交表单|验证码|密码|管理员|卸载"
 )
-EXIT_PATTERN = re.compile(r"^(拜拜|再见|不聊了|先这样|结束对话|退出连续对话)[吧呀啊啦。！!]*$")
+EXIT_PATTERN = re.compile(
+    r"^(?:(?:拜拜|再见|不聊了|先这样|结束对话|退出连续对话)|"
+    r"(?:没事(?:了|啦|咯)?)(?:[，,、\s]*没事(?:了|啦|咯)?)*?)"
+    r"(?:[，,、\s]*(?:谢谢你?)?)?[吧呀啊啦咯哦。！!]*$"
+)
 
 
 class AssistantBridge(QObject):
@@ -74,6 +78,7 @@ class AssistantBridge(QObject):
     _taskFailed = Signal(str)
     _transcriptionReady = Signal(str, float)
     _transcriptionFailed = Signal(str)
+    _followupTimedOut = Signal()
     _speechFinished = Signal(str, str)
     _speechFailed = Signal(str)
     _wakeTriggered = Signal()
@@ -149,6 +154,7 @@ class AssistantBridge(QObject):
         self._ui_database = Database(app_paths().database)
         self._generated_skill_store = GeneratedSkillStore(app_paths().data / "generated_skills")
         self._ui_database.recover_interrupted_scheduled_tasks()
+        self._ui_database.expire_missed_scheduled_tasks()
         self._startup_components = missing_startup_components()
         self._startup_progress = 0
         self._startup_message = "需要安装启动组件" if self._startup_components else ""
@@ -157,6 +163,7 @@ class AssistantBridge(QObject):
         self._taskFailed.connect(self._finish_error)
         self._transcriptionReady.connect(self._finish_transcription)
         self._transcriptionFailed.connect(self._finish_transcription_error)
+        self._followupTimedOut.connect(self._finish_followup_timeout)
         self._speechFinished.connect(self._finish_speech)
         self._speechFailed.connect(self._finish_speech_error)
         self._wakeTriggered.connect(self._handle_wake)
@@ -197,7 +204,13 @@ class AssistantBridge(QObject):
                 "enabled": is_skill_enabled(self.config, skill.id),
                 "favorite": skill.id in favorites,
                 "hasSettings": skill.id
-                in {"wake-word", "continuous-conversation", "desk-lamp", "starrail-dailies"},
+                in {
+                    "wake-word",
+                    "continuous-conversation",
+                    "desk-lamp",
+                    "starrail-dailies",
+                    "scheduled-tasks",
+                },
             }
             for skill in SKILL_CATALOG
         ]
@@ -261,6 +274,7 @@ class AssistantBridge(QObject):
             "succeeded": "上次成功",
             "failed": "上次失败",
             "cancelled": "已停用",
+            "missed": "已错过",
         }
         values = []
         for task in self._ui_database.list_scheduled_tasks(include_disabled=True):
@@ -269,6 +283,7 @@ class AssistantBridge(QObject):
             item["repeatLabel"] = "每天" if task["repeat_rule"] == "daily" else "仅一次"
             item["modeLabel"] = "静默" if task["silent"] else "普通"
             item["statusLabel"] = status_names.get(str(task["last_status"]), str(task["last_status"]))
+            item["lastResultLabel"] = str(task["last_result"] or "")
             item["enabled"] = bool(task["enabled"])
             values.append(item)
         return values
@@ -455,6 +470,13 @@ class AssistantBridge(QObject):
         return self._runtime
 
     def _run_prompt(self, text: str, input_mode: str) -> None:
+        started = time.perf_counter()
+
+        def timed_meta(value: str) -> str:
+            elapsed = time.perf_counter() - started
+            prefix = f"{value} · " if value else ""
+            return f"{prefix}耗时 {elapsed:.1f} 秒"
+
         try:
             generated_skill = self._generated_skill_store.match(text)
             generated_meta = ""
@@ -471,10 +493,14 @@ class AssistantBridge(QObject):
                         "description": f"执行代码技能：{generated_skill.get('name', '未命名技能')}",
                     }
                     if not self._confirm_tool("run_generated_code", arguments):
-                        self._answerReady.emit("已取消执行代码技能。", generated_meta, input_mode)
+                        self._answerReady.emit(
+                            "已取消执行代码技能。",
+                            timed_meta(generated_meta),
+                            input_mode,
+                        )
                         return
                     result = self._generated_skill_store.execute_code(generated_skill, text)
-                    self._answerReady.emit(result, generated_meta, input_mode)
+                    self._answerReady.emit(result, timed_meta(generated_meta), input_mode)
                     return
                 generated_allowed_tools = set(map(str, generated_skill.get("required_tools", [])))
                 text = self._generated_skill_store.workflow_prompt(generated_skill, text)
@@ -486,7 +512,20 @@ class AssistantBridge(QObject):
                 meta += f" · {reason}"
             if generated_meta:
                 meta += f" · {generated_meta}"
-            self._answerReady.emit(answer.text, meta, input_mode)
+            timing_labels = {
+                "model:kimi-k2.6": "K2.6",
+                "model:kimi-k3": "K3",
+                "model:mimo-v2.5": "MiMo",
+                "model:mimo-v2.5-pro": "MiMo Pro",
+                "tools": "工具",
+            }
+            timing_parts = [
+                f"{timing_labels.get(name, name)} {seconds:.1f} 秒"
+                for name, seconds in getattr(answer, "timings", ())
+            ]
+            if timing_parts:
+                meta += " · " + " / ".join(timing_parts)
+            self._answerReady.emit(answer.text, timed_meta(meta), input_mode)
         except BudgetExceeded as exc:
             self._taskFailed.emit(f"预算限制：{exc}")
         except Exception as exc:
@@ -625,6 +664,14 @@ class AssistantBridge(QObject):
         self._continuous_session = False
         self._resume_wake()
 
+    @Slot()
+    def _finish_followup_timeout(self) -> None:
+        self._recording = False
+        self.recordingChanged.emit()
+        self._continuous_session = False
+        self._set_busy(False, "就绪")
+        self._resume_wake()
+
     def _begin_continuous_recording(self) -> None:
         if self._busy or self._recording or self._closing:
             return
@@ -645,7 +692,7 @@ class AssistantBridge(QObject):
             )
             if not heard:
                 self._recorder.cancel()
-                self._transcriptionFailed.emit("等待后续语音超时")
+                self._followupTimedOut.emit()
                 return
             self._recording = False
             self.recordingChanged.emit()
@@ -1334,6 +1381,7 @@ class AssistantBridge(QObject):
 
     def _run_schedule(self, task: dict[str, Any], cancel_event: threading.Event) -> None:
         task_id = int(task["id"])
+        started = time.perf_counter()
         agent = database = None
         try:
             agent, database, _tts = build_agent(
@@ -1346,9 +1394,21 @@ class AssistantBridge(QObject):
             answer = agent.run(str(task["command"]), input_mode="text")
             result = answer.text.strip() or "操作已完成"
             success = not bool(re.search(r"失败|无法|未找到|已取消|拒绝|错误|没有执行", result))
-            self._scheduleFinished.emit(task_id, success, result, bool(task["silent"]))
+            elapsed = time.perf_counter() - started
+            self._scheduleFinished.emit(
+                task_id,
+                success,
+                f"{result}（耗时 {elapsed:.1f} 秒）",
+                bool(task["silent"]),
+            )
         except Exception as exc:
-            self._scheduleFinished.emit(task_id, False, str(exc), bool(task["silent"]))
+            elapsed = time.perf_counter() - started
+            self._scheduleFinished.emit(
+                task_id,
+                False,
+                f"{exc}（耗时 {elapsed:.1f} 秒）",
+                bool(task["silent"]),
+            )
         finally:
             if agent is not None:
                 agent.close()

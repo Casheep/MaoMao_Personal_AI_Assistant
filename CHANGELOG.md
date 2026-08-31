@@ -2,6 +2,22 @@
 
 All notable changes to MaoMao Personal AI Assistant are recorded here.
 
+## [v0.0.3_beta2] - 2026-08-31
+
+- Added a Windows UI Automation fast path that executes explicit clicks and text entry locally only when the foreground window exposes one unique exact control match.
+- Added a compact, relevance-ordered UIA context and pre-attached visual overview so explicit screen observations no longer require a model request just to ask for a screenshot.
+- Preserved the existing screen-control confirmations, skill switches and action audit trail for UIA operations, while treating interface text as untrusted data and excluding current input values.
+- Split screen diagnostics into UIA snapshot, matching, execution, capture, image-save and image-encoding timings, and exposed per-model and tool timing breakdowns in response metadata.
+- Added adaptive foreground-window JPEG profiles: 896-pixel overview, 1152-pixel balanced and 1536-pixel detail, with the full desktop retained only as a safe fallback.
+- Routed routine screen observations through one non-thinking Kimi K2.6 vision call while reserving K3 detail for small text, OCR, charts and precision work.
+- Added on-demand region zoom from the transient in-memory source frame, allowing a model to inspect one high-resolution ROI instead of pre-slicing or repeatedly uploading the whole screen.
+- Moved adaptive capture, ROI encoding and task-scoped source-frame ownership into a dedicated screen session, removing an extra full-resolution image copy and releasing the source during task cleanup.
+- Added a longer silent preroll when a fresh audio output stream opens so sleeping speakers can wake before the first phoneme, while retaining the shorter normal inter-utterance padding on an active stream.
+- Exposed scheduled-task management through the scheduled-task skill settings available from favorites, and changed startup recovery to mark elapsed occurrences as missed instead of running them late.
+- Added elapsed processing time to each assistant response record and the latest result shown for each scheduled task.
+- Styled both user and MaoMao sender names with the existing blue accent in conversation history while retaining the secondary color for system records.
+- Removed the obsolete speech pause, resume and stop controls; normal follow-up-listening timeouts now return silently to ready, and “never mind”/“没事了” variants end continuous listening like a goodbye.
+
 ## [v0.0.3_beta1] - 2026-08-12
 
 - Added an arrow-free purple creator tab in the central column; expanding it yields the message-input space, reduces conversation history and keeps audio controls and both sidebars available.

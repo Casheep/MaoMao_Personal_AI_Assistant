@@ -653,7 +653,7 @@ ApplicationWindow {
                     spacing: 10
                     RowLayout {
                         Layout.fillWidth: true
-                        Label { Layout.fillWidth: true; text: "猫猫在运行或缩到托盘时会按本机时间执行；普通任务也不会额外语音通知。"; color: window.secondaryText; font.pixelSize: 12 }
+                        Label { Layout.fillWidth: true; text: "猫猫仅在运行或缩到托盘时按本机时间执行；关机期间错过的任务会跳过，不会在下次启动时补跑。"; color: window.secondaryText; font.pixelSize: 12 }
                         Label { text: "启用 " + assistant.schedules.filter(item => item.enabled).length + " / 共 " + assistant.schedules.length + " 个"; color: window.accent; font.bold: true; leftPadding: 12; rightPadding: 12; topPadding: 7; bottomPadding: 7; background: Rectangle { radius: height / 2; color: "#E8F2FF" } }
                     }
                     Card {
@@ -677,8 +677,8 @@ ApplicationWindow {
                             anchors.fill: parent; clip: true; spacing: 8; model: assistant.schedules
                             delegate: Rectangle {
                                 required property var modelData
-                                width: scheduleView.width; height: 82; radius: 24; color: window.cardColor; border.color: window.borderColor
-                                RowLayout { anchors.fill: parent; anchors.margins: 15; ColumnLayout { Layout.fillWidth: true; Label { text: "#" + modelData.id + "  " + modelData.command; font.bold: true; color: window.textColor } Label { text: modelData.repeatLabel + " · " + modelData.displayTime + " · " + modelData.modeLabel + " · " + modelData.statusLabel; font.pixelSize: 11; color: window.secondaryText } } SoftButton { visible: modelData.enabled; implicitWidth: 58; text: "停用"; onClicked: assistant.cancelSchedule(modelData.id) } DangerButton { implicitWidth: 58; text: "删除"; onClicked: assistant.deleteSchedule(modelData.id) } }
+                                width: scheduleView.width; height: modelData.lastResultLabel === "" ? 82 : 100; radius: 24; color: window.cardColor; border.color: window.borderColor
+                                RowLayout { anchors.fill: parent; anchors.margins: 15; ColumnLayout { Layout.fillWidth: true; Label { text: "#" + modelData.id + "  " + modelData.command; font.bold: true; color: window.textColor } Label { text: modelData.repeatLabel + " · " + modelData.displayTime + " · " + modelData.modeLabel + " · " + modelData.statusLabel; font.pixelSize: 11; color: window.secondaryText } Label { visible: modelData.lastResultLabel !== ""; Layout.fillWidth: true; text: modelData.lastResultLabel; elide: Text.ElideRight; font.pixelSize: 11; color: window.secondaryText } } SoftButton { visible: modelData.enabled; implicitWidth: 58; text: "停用"; onClicked: assistant.cancelSchedule(modelData.id) } DangerButton { implicitWidth: 58; text: "删除"; onClicked: assistant.deleteSchedule(modelData.id) } }
                             }
                             Label { anchors.centerIn: parent; visible: scheduleView.count === 0; text: "还没有定时任务"; color: window.secondaryText }
                         }
@@ -837,7 +837,7 @@ ApplicationWindow {
                             delegate: ColumnLayout {
                                 required property var modelData
                                 width: chatView.width; spacing: 3
-                                Label { text: modelData.role === "user" ? "你" : (modelData.role === "assistant" ? "猫猫" : "系统"); font.pixelSize: 13; font.bold: modelData.role === "user"; color: modelData.role === "user" ? window.accent : (modelData.role === "system" ? window.secondaryText : window.textColor) }
+                                Label { text: modelData.role === "user" ? "你" : (modelData.role === "assistant" ? "猫猫" : "系统"); font.pixelSize: 13; font.bold: modelData.role !== "system"; color: modelData.role === "system" ? window.secondaryText : window.accent }
                                 Label { Layout.fillWidth: true; text: modelData.text; wrapMode: Text.Wrap; font.pixelSize: 13; color: window.textColor }
                                 Label { visible: modelData.meta !== ""; text: modelData.meta; font.pixelSize: 11; color: "#8E8E93" }
                             }
@@ -867,10 +867,6 @@ ApplicationWindow {
                         }
                         RowLayout {
                             Layout.fillWidth: true
-                            Label { text: "播放"; color: window.secondaryText; font.pixelSize: 12; Layout.rightMargin: 5 }
-                            SoftButton { implicitWidth: 62; text: "暂停"; onClicked: assistant.ttsControl("pause") }
-                            SoftButton { implicitWidth: 62; text: "继续"; onClicked: assistant.ttsControl("resume") }
-                            SoftButton { implicitWidth: 62; text: "停止"; onClicked: assistant.ttsControl("stop") }
                             Item { Layout.fillWidth: true }
                             PreloadButton { objectName: "compactPreloadButton"; visible: audioControlCard.compactAudioControls; labeled: true }
                             DangerButton { objectName: "pauseAllButton"; implicitWidth: 82; text: "暂停全部"; onClicked: assistant.pauseAll() }

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -73,9 +74,9 @@ class QtQuickMigrationTests(unittest.TestCase):
             bridge.close()
 
     def test_public_pep440_and_windows_versions_use_their_required_formats(self) -> None:
-        self.assertEqual(__version__, "v0.0.3_beta1")
+        self.assertEqual(__version__, "v0.0.3_beta2")
         project = Path("pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.0.3b1"', project)
+        self.assertIn('version = "0.0.3b2"', project)
         launcher = Path("launcher/MaoMaoLauncher.cs").read_text(encoding="utf-8")
         self.assertIn('AssemblyVersion("0.0.3.0")', launcher)
         self.assertIn('AssemblyFileVersion("0.0.3.0")', launcher)
@@ -142,7 +143,29 @@ class QtQuickMigrationTests(unittest.TestCase):
         from assistant_app.qt_quick.bridge import EXIT_PATTERN
 
         self.assertIsNotNone(EXIT_PATTERN.fullmatch("拜拜啦"))
+        self.assertIsNotNone(EXIT_PATTERN.fullmatch("没事了"))
+        self.assertIsNotNone(EXIT_PATTERN.fullmatch("没事了，没事了"))
+        self.assertIsNotNone(EXIT_PATTERN.fullmatch("没事了，谢谢你"))
         self.assertIsNone(EXIT_PATTERN.fullmatch("继续帮我看看天气"))
+        self.assertIsNone(EXIT_PATTERN.fullmatch("没事了，帮我关灯"))
+
+    def test_followup_timeout_returns_to_ready_without_a_failure_message(self) -> None:
+        bridge = AssistantBridge()
+        try:
+            bridge._recording = True
+            bridge._continuous_session = True
+            with patch.object(bridge, "_resume_wake"):
+                bridge._finish_followup_timeout()
+            self.assertFalse(bridge.recording)
+            self.assertFalse(bridge._continuous_session)
+            self.assertEqual(bridge.status, "就绪")
+            source = Path("assistant_app/qt_quick/bridge.py").read_text(encoding="utf-8")
+            self.assertNotIn(
+                'self._transcriptionFailed.emit("等待后续语音超时")',
+                source,
+            )
+        finally:
+            bridge.close()
 
     def test_schedule_ui_preserves_normal_and_silent_modes(self) -> None:
         bridge = AssistantBridge()
@@ -156,6 +179,87 @@ class QtQuickMigrationTests(unittest.TestCase):
             qml = Path("assistant_app/qt_quick/qml/Main.qml").read_text(encoding="utf-8")
             self.assertIn("scheduleSilent.checked", qml)
             self.assertIn("assistant.defaultScheduleTime", qml)
+            self.assertNotIn('text: "定时任务"; onClicked: window.openManager(2)', qml)
+            self.assertIn("modelData.lastResultLabel", qml)
+            scheduled = next(item for item in bridge.skills if item["id"] == "scheduled-tasks")
+            self.assertTrue(scheduled["hasSettings"])
+        finally:
+            bridge.close()
+
+    def test_bridge_expires_missed_schedules_before_polling(self) -> None:
+        with patch(
+            "assistant_app.qt_quick.bridge.Database.expire_missed_scheduled_tasks",
+            return_value=2,
+        ) as expire:
+            bridge = AssistantBridge()
+        try:
+            expire.assert_called_once_with()
+        finally:
+            bridge.close()
+
+    def test_answer_history_includes_task_elapsed_time(self) -> None:
+        bridge = AssistantBridge()
+        try:
+            bridge.config.setdefault("tts", {})["enabled"] = False
+            bridge._generated_skill_store.match = lambda _text: None
+            answer = SimpleNamespace(
+                text="完成",
+                route=SimpleNamespace(model="kimi-k3", reasoning="low", reasons=()),
+                timings=(
+                    ("model:kimi-k2.6", 3.36),
+                    ("model:kimi-k3", 40.91),
+                    ("tools", 0.47),
+                ),
+            )
+            bridge._runtime = (
+                SimpleNamespace(run=lambda *_args, **_kwargs: answer),
+                None,
+                None,
+            )
+            with patch(
+                "assistant_app.qt_quick.bridge.time.perf_counter",
+                side_effect=[100.0, 145.5],
+            ):
+                bridge._run_prompt("测试", "text")
+            self.assertEqual(bridge.messages[-1]["text"], "完成")
+            self.assertIn("耗时 45.5 秒", bridge.messages[-1]["meta"])
+            self.assertIn("K2.6 3.4 秒 / K3 40.9 秒 / 工具 0.5 秒", bridge.messages[-1]["meta"])
+        finally:
+            bridge._runtime = None
+            bridge.close()
+
+    def test_scheduled_task_result_includes_elapsed_time(self) -> None:
+        bridge = AssistantBridge()
+        emitted: list[tuple[int, bool, str, bool]] = []
+        bridge._scheduleFinished.connect(
+            lambda task_id, success, result, silent: emitted.append(
+                (task_id, success, result, silent)
+            )
+        )
+        fake_agent = SimpleNamespace(
+            run=lambda *_args, **_kwargs: SimpleNamespace(text="任务完成"),
+            close=lambda: None,
+        )
+        fake_database = SimpleNamespace(close=lambda: None)
+        try:
+            with (
+                patch(
+                    "assistant_app.qt_quick.bridge.build_agent",
+                    return_value=(fake_agent, fake_database, None),
+                ),
+                patch.object(bridge._ui_database, "complete_scheduled_task"),
+                patch(
+                    "assistant_app.qt_quick.bridge.time.perf_counter",
+                    side_effect=[200.0, 203.21],
+                ),
+            ):
+                bridge._run_schedule(
+                    {"id": 42, "command": "测试任务", "silent": True},
+                    SimpleNamespace(),
+                )
+            self.assertEqual(emitted[0][:2], (42, True))
+            self.assertIn("任务完成", emitted[0][2])
+            self.assertIn("耗时 3.2 秒", emitted[0][2])
         finally:
             bridge.close()
 
@@ -187,6 +291,10 @@ class QtQuickMigrationTests(unittest.TestCase):
         self.assertIn('implicitWidth: 258', main_controls)
         self.assertIn('住在你电脑里的语音助手喵~', qml)
         self.assertNotIn('model: ["设置", "权限", "定时任务", "关于"]', qml)
+        self.assertIn(
+            'color: modelData.role === "system" ? window.secondaryText : window.accent',
+            qml,
+        )
 
     def test_bridge_persists_sidebar_visibility(self) -> None:
         bridge = AssistantBridge()
@@ -437,6 +545,19 @@ class QtQuickMigrationTests(unittest.TestCase):
                 position = control.mapToItem(card, QPointF(0, 0))
                 self.assertGreaterEqual(position.x(), 0)
                 self.assertLessEqual(position.x() + control.width(), card.width())
+            qml = Path("assistant_app/qt_quick/qml/Main.qml").read_text(encoding="utf-8")
+            self.assertNotIn(
+                'text: "暂停"; onClicked: assistant.ttsControl("pause")',
+                qml,
+            )
+            self.assertNotIn(
+                'text: "继续"; onClicked: assistant.ttsControl("resume")',
+                qml,
+            )
+            self.assertNotIn(
+                'text: "停止"; onClicked: assistant.ttsControl("stop")',
+                qml,
+            )
         finally:
             bridge.close()
 

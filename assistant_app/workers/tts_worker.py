@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..secrets import load_mimo_key, redact_secret
+from .audio_output import speaker_preroll_ms
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -249,9 +250,10 @@ class AlternateTTSWorker:
             # Start and keep the output device awake before the first phoneme.
             # Some Windows audio devices swallow the beginning of a stream
             # that starts immediately with speech.
+            current_stream = self._stream if self._sample_rate == sample_rate else None
             leading_frames = max(
                 0,
-                round(sample_rate * int(request.get("leading_silence_ms", 220)) / 1000),
+                round(sample_rate * speaker_preroll_ms(request, current_stream) / 1000),
             )
             if leading_frames:
                 self._enqueue_playback(np.zeros(leading_frames, dtype=np.float32), sample_rate)
